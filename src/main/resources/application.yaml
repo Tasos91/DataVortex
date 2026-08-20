@@ -1,0 +1,89 @@
+spring:
+  application:
+    name: data-vortex
+
+  # ----------------------------------------------------
+  # 1. Βάση Δεδομένων (PostgreSQL)
+  # ----------------------------------------------------
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:bigdata_db}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASS:postgres}
+  jpa:
+    hibernate:
+      ddl-auto: update # Ή 'validate' σε production
+    show-sql: false
+
+  # ----------------------------------------------------
+  # 2. Ρυθμίσεις Spring Cloud Stream (Για τον Consumer)
+  # ----------------------------------------------------
+  cloud:
+    function:
+      # Δηλώνουμε μόνο το consumeData, καθώς ο Producer είναι KafkaTemplate
+      definition: consumeData
+
+    stream:
+      kafka:
+        binder:
+          brokers: ${KAFKA_BROKERS:localhost:9092}
+          auto-create-topics: false
+
+          consumer-properties:
+            # Χρησιμοποιούμε StringDeserializer επειδή στέλνουμε JSON payload, όχι Avro ακόμα
+            key.deserializer: org.apache.kafka.common.serialization.StringDeserializer
+            value.deserializer: org.apache.kafka.common.serialization.StringDeserializer
+            fetch.min.bytes: ${KAFKA_FETCH_MIN_BYTES:1}
+
+      # ----------------------------------------------------
+      # 3. Bindings: Εδώ ικανοποιείς την απαίτηση του Καθηγητή
+      # ----------------------------------------------------
+      bindings:
+        # Consumer (Ανάγνωση από Kafka -> DB)
+        consumeData-in-0:
+          destination: ${KAFKA_TOPIC:ais-data} # Κοινό Topic!
+          group: ${CONSUMER_GROUP:default-ingestion-group}
+          consumer:
+            startOffset: earliest # <-- Αυτό ξυπνάει το earliest στο Cloud Stream
+            useNativeDecoding: true
+            concurrency: ${CONSUMER_CONCURRENCY:1}
+
+  # ----------------------------------------------------
+  # 4. Standard Kafka Properties (Για Producer & @KafkaListener Consumer)
+  # ----------------------------------------------------
+  kafka:
+    bootstrap-servers: ${KAFKA_BROKERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        linger.ms: ${KAFKA_LINGER_MS:0}
+        batch.size: ${KAFKA_BATCH_SIZE:16384}
+
+    consumer:
+      group-id: ${CONSUMER_GROUP:thesis-group-v3}
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+
+    # Το custom property που διαβάζει ο FileStreamingService & ο Consumer
+    topic:
+      ingestion: ${KAFKA_TOPIC:ais-data}
+
+# ----------------------------------------------------
+# 5. Monitoring (Prometheus Metrics & Actuator)
+# ----------------------------------------------------
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    prometheus:
+      enabled: true
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+server:
+  port: 8080
