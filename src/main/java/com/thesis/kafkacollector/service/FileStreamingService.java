@@ -3,6 +3,7 @@ package com.thesis.kafkacollector.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.thesis.kafkacollector.dto.IngestionRequest;
 import com.thesis.kafkacollector.entity.IngestedRecord;
+import com.thesis.kafkacollector.proto.IngestedRecordProto;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -19,14 +20,15 @@ import java.util.Map;
 @Slf4j
 public class FileStreamingService {
 
-    private final KafkaTemplate<String, String> kafkaTemplate;
+    // ΑΛΛΑΓΗ: Το KafkaTemplate πλέον στέλνει byte[] (binary) αντί για String
+    private final KafkaTemplate<String, byte[]> kafkaTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     // Όρισε το όνομα του topic (μπορείς να το βάλεις και στο application.properties)
     @Value("${kafka.topic.ingestion:ais-data}")
     private String topic;
 
-    public FileStreamingService(KafkaTemplate<String, String> kafkaTemplate) {
+    public FileStreamingService(KafkaTemplate<String, byte[]> kafkaTemplate) {
         this.kafkaTemplate = kafkaTemplate;
     }
 
@@ -41,29 +43,40 @@ public class FileStreamingService {
             String line;
 
             while ((line = br.readLine()) != null) {
-                String[] values = line.split(",");
-                Map<String, Object> rawJsonMap = new HashMap<>();
+                // ΕΣΩΤΕΡΙΚΟ TRY-CATCH: Για να μη σταματήσει το loop αν μια γραμμή είναι "χαλασμένη"
+                try {
+                    String[] values = line.split(",");
+                    Map<String, Object> rawJsonMap = new HashMap<>();
 
-                for (int i = 0; i < headers.length && i < values.length; i++) {
-                    rawJsonMap.put(headers[i].trim(), values[i].trim());
+                    for (int i = 0; i < headers.length && i < values.length; i++) {
+                        rawJsonMap.put(headers[i].trim(), values[i].trim());
+                    }
+
+                    Double lat = extractDouble(rawJsonMap, mappings.get("lat"));
+                    Double lon = extractDouble(rawJsonMap, mappings.get("lon"));
+                    String payloadJson = objectMapper.writeValueAsString(rawJsonMap);
+
+                    // ΑΛΛΑΓΗ: Δημιουργία του αντικειμένου με τον Builder του Protobuf
+                    IngestedRecordProto.IngestedRecord record = IngestedRecordProto.IngestedRecord.newBuilder()
+                            .setSourceId(request.getSourceId() != null ? request.getSourceId() : "")
+                            .setPayloadJson(payloadJson != null ? payloadJson : "")
+                            .setLat(lat != null ? lat : 0.0)
+                            .setLon(lon != null ? lon : 0.0)
+                            .build();
+
+                    // ΑΛΛΑΓΗ: Μετατροπή ολόκληρου του record σε byte[] (binary) για να σταλεί στο Kafka
+                    byte[] messageToSend = record.toByteArray();
+
+                    // Αποστολή στο Kafka Topic (βάζουμε το SourceId ως κλειδί του μηνύματος)
+                    kafkaTemplate.send(topic, request.getSourceId(), messageToSend).whenComplete((result, ex) -> {
+                        if (ex != null) {
+                            log.error("Αποτυχία αποστολής στο Kafka για το sourceId: {}", request.getSourceId(), ex);
+                        }
+                    });
+
+                } catch (Exception e) {
+                    log.warn("Σφάλμα κατά την επεξεργασία της γραμμής CSV: {}. Αιτία: {}", line, e.getMessage());
                 }
-
-                Double lat = extractDouble(rawJsonMap, mappings.get("lat"));
-                Double lon = extractDouble(rawJsonMap, mappings.get("lon"));
-                String payloadJson = objectMapper.writeValueAsString(rawJsonMap);
-
-                // Δημιουργία του αντικειμένου
-                IngestedRecord record = new IngestedRecord(
-                        request.getSourceId(),
-                        payloadJson,
-                        lat,
-                        lon
-                );
-                // Μετατροπή ολόκληρου του record σε JSON για να σταλεί στο Kafka
-                String messageToSend = objectMapper.writeValueAsString(record);
-
-                // Αποστολή στο Kafka Topic
-                kafkaTemplate.send(topic, messageToSend);
             }
         }
     }
@@ -76,6 +89,7 @@ public class FileStreamingService {
             return null;
         }
     }
+
     public void processJsonStream(IngestionRequest request) throws Exception {
         Map<String, String> mappings = request.getFieldMappings();
         log.info("Ξεκινάει η επεξεργασία JSON αρχείου: {}", request.getFilePath());
@@ -96,22 +110,35 @@ public class FileStreamingService {
 
             while (token != null && token != com.fasterxml.jackson.core.JsonToken.END_ARRAY) {
                 if (token == com.fasterxml.jackson.core.JsonToken.START_OBJECT) {
-                    Map<String, Object> rawJsonMap = objectMapper.readValue(parser, Map.class);
+                    // ΕΣΩΤΕΡΙΚΟ TRY-CATCH
+                    try {
+                        Map<String, Object> rawJsonMap = objectMapper.readValue(parser, Map.class);
 
-                    Double lat = extractDouble(rawJsonMap, mappings.get("lat"));
-                    Double lon = extractDouble(rawJsonMap, mappings.get("lon"));
-                    String payloadJson = objectMapper.writeValueAsString(rawJsonMap);
+                        Double lat = extractDouble(rawJsonMap, mappings.get("lat"));
+                        Double lon = extractDouble(rawJsonMap, mappings.get("lon"));
+                        String payloadJson = objectMapper.writeValueAsString(rawJsonMap);
 
-                    IngestedRecord record = new IngestedRecord(
-                            request.getSourceId(),
-                            payloadJson,
-                            lat,
-                            lon
-                    );
+                        // ΑΛΛΑΓΗ: Δημιουργία του αντικειμένου με τον Builder του Protobuf
+                        IngestedRecordProto.IngestedRecord record = IngestedRecordProto.IngestedRecord.newBuilder()
+                                .setSourceId(request.getSourceId() != null ? request.getSourceId() : "")
+                                .setPayloadJson(payloadJson != null ? payloadJson : "")
+                                .setLat(lat != null ? lat : 0.0)
+                                .setLon(lon != null ? lon : 0.0)
+                                .build();
 
-                    String messageToSend = objectMapper.writeValueAsString(record);
-                    kafkaTemplate.send(topic, messageToSend);
-                    recordCount++;
+                        // ΑΛΛΑΓΗ: Μετατροπή σε byte[]
+                        byte[] messageToSend = record.toByteArray();
+
+                        kafkaTemplate.send(topic, request.getSourceId(), messageToSend).whenComplete((result, ex) -> {
+                            if (ex != null) {
+                                log.error("Αποτυχία αποστολής στο Kafka για το sourceId: {}", request.getSourceId(), ex);
+                            }
+                        });
+                        recordCount++;
+
+                    } catch (Exception e) {
+                        log.warn("Σφάλμα κατά την επεξεργασία ενός JSON object. Αιτία: {}", e.getMessage());
+                    }
                 }
                 token = parser.nextToken();
             }

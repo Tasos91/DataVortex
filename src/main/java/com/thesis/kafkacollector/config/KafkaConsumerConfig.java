@@ -1,5 +1,6 @@
 package com.thesis.kafkacollector.config;
 
+import com.thesis.kafkacollector.proto.IngestedRecordProto;
 import com.thesis.kafkacollector.service.DashboardMetricsService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,10 +25,21 @@ public class KafkaConsumerConfig {
     }
 
     @Bean
-    public Consumer<String> consumeData() {
-        return message -> {
-            log.info("✅ ΕΠΙΤΕΛΟΥΣ! Το Spring Cloud Stream διάβασε: {}", message);
-            metricsService.recordMessage(message);
+    public Consumer<byte[]> consumeData() {
+        return payload -> {
+            try {
+                // Η ΜΑΓΕΙΑ: Μετατρέπουμε τα "γυμνά" bytes ξανά σε Protobuf Object
+                IngestedRecordProto.IngestedRecord record = IngestedRecordProto.IngestedRecord.parseFrom(payload);
+
+                log.info("✅ ΕΠΙΤΕΛΟΥΣ! Το Spring Cloud Stream διάβασε Protobuf. SourceID: {}, Lat: {}",
+                        record.getSourceId(), record.getLat());
+
+                // ΠΡΟΣΟΧΗ: Αν η recordMessage θέλει String, στείλε της π.χ. το JSON string που κρύψαμε μέσα στο record
+                metricsService.recordMessage(record.getPayloadJson());
+
+            } catch (Exception e) {
+                log.error("❌ Αποτυχία μετατροπής των bytes σε Protobuf", e);
+            }
         };
     }
 

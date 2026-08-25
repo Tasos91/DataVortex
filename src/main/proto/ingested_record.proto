@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+option java_package = "com.thesis.kafkacollector.proto";
+option java_outer_classname = "IngestedRecordProto";
+
+message IngestedRecord {
+  string sourceId = 1;
+  string payloadJson = 2; // Κρατάμε το raw json string όπως το είχες
+  double lat = 3;
+  double lon = 4;
+}

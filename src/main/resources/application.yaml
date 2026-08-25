@@ -29,9 +29,9 @@ spring:
           auto-create-topics: false
 
           consumer-properties:
-            # Χρησιμοποιούμε StringDeserializer επειδή στέλνουμε JSON payload, όχι Avro ακόμα
             key.deserializer: org.apache.kafka.common.serialization.StringDeserializer
-            value.deserializer: org.apache.kafka.common.serialization.StringDeserializer
+            # ΔΙΟΡΘΩΣΗ: Πρέπει να διαβάζει Bytes (Protobuf), ΟΧΙ String!
+            value.deserializer: org.apache.kafka.common.serialization.ByteArrayDeserializer
             fetch.min.bytes: ${KAFKA_FETCH_MIN_BYTES:1}
 
       # ----------------------------------------------------
@@ -54,16 +54,22 @@ spring:
     bootstrap-servers: ${KAFKA_BROKERS:localhost:9092}
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # ΔΙΟΡΘΩΣΗ: Στέλνουμε Bytes, ΟΧΙ String! (Αυτό έφταιγε για το SerializationException)
+      value-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+
+      # --- ΠΡΟΣΘΗΚΕΣ & ΑΛΛΑΓΕΣ ΓΙΑ BIG DATA STREAMING ---
+      compression-type: lz4                                # Σώζει bandwidth, ιδανικό για JSON/CSV
+      batch-size: ${KAFKA_BATCH_SIZE:65536}                # Αλλάξαμε το default από 16384 (16KB) σε 65536 (64KB)
+      buffer-memory: ${KAFKA_BUFFER_MEMORY:67108864}       # 64MB (προστατεύει από OutOfMemory αν το Kafka καθυστερεί)
       properties:
-        linger.ms: ${KAFKA_LINGER_MS:0}
-        batch.size: ${KAFKA_BATCH_SIZE:16384}
+        linger.ms: ${KAFKA_LINGER_MS:5}                    # Αλλάξαμε το 0 σε 5ms για να προλαβαίνει να γεμίσει το batch
 
     consumer:
       group-id: ${CONSUMER_GROUP:thesis-group-v3}
       auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # ΔΙΟΡΘΩΣΗ: Deserializer (Διαβάζει), όχι Serializer!
+      value-deserializer: org.apache.kafka.common.serialization.ByteArrayDeserializer
 
     # Το custom property που διαβάζει ο FileStreamingService & ο Consumer
     topic:

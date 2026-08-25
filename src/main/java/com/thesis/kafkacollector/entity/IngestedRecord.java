@@ -12,7 +12,7 @@ public class IngestedRecord {
     private Long id;
 
     @Column(name = "source_id")
-    private Integer sourceId;
+    private String sourceId;
 
     @Column(columnDefinition = "jsonb", name = "payload")
     private String payload;
@@ -25,7 +25,7 @@ public class IngestedRecord {
 
     public IngestedRecord() {}
 
-    public IngestedRecord(Integer sourceId, String payload, Double latitude, Double longitude) {
+    public IngestedRecord(String sourceId, String payload, Double latitude, Double longitude) {
         this.sourceId = sourceId;
         this.payload = payload;
         this.latitude = latitude;
@@ -35,7 +35,7 @@ public class IngestedRecord {
 
     // Getters & Setters
     public Long getId() { return id; }
-    public Integer getSourceId() { return sourceId; }
+    public String getSourceId() { return sourceId; }
     public String getPayload() { return payload; }
     public Double getLatitude() { return latitude; }
     public Double getLongitude() { return longitude; }
