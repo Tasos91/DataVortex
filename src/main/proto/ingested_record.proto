@@ -8,7 +8,10 @@ option java_outer_classname = "IngestedRecordProto";
 message IngestedRecord {
   string sourceId = 1;
   string payloadJson = 2;
-  double lat = 3;
-  double lon = 4;
+  // optional: το proto3 κρατά "παρουσία" (hasLat/hasLon), ώστε να ξεχωρίζει το
+  // "ο χρήστης δεν χαρτογράφησε συντεταγμένες" από το "η τιμή είναι 0".
+  // Στη βάση το πρώτο γίνεται NULL και όχι 0.0.
+  optional double lat = 3;
+  optional double lon = 4;
   map<string, google.protobuf.Value> fields = 5; // Δυναμικά πεδία: το όνομα του πεδίου και η διαδρομή (JSONPath) ορίζονται από τον χρήστη
 }

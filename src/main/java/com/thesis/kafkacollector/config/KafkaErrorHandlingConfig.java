@@ -11,6 +11,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cloud.stream.config.ListenerContainerCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.TransientDataAccessException;
+import org.springframework.jdbc.CannotGetJdbcConnectionException;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.listener.AbstractMessageListenerContainer;
@@ -78,7 +81,28 @@ public class KafkaErrorHandlingConfig implements DisposableBean {
                     return new TopicPartition(dlqTopic, -1);
                 });
         // Τα αρχικά topic/partition/offset και το σφάλμα μπαίνουν σε headers του μηνύματος DLQ.
-        return new DefaultErrorHandler(recoverer, new FixedBackOff(retryIntervalMs, retryAttempts));
+        DefaultErrorHandler handler = new DefaultErrorHandler(recoverer, new FixedBackOff(retryIntervalMs, retryAttempts));
+
+        // ΣΗΜΑΝΤΙΚΟ: αν πέσει η βάση, τα μηνύματα ΔΕΝ είναι χαλασμένα — δεν έχουν λόγο να πάνε
+        // στο DLQ. Ξαναδοκιμάζουμε για πάντα: τα offsets δεν γίνονται commit, το Kafka κρατά
+        // τα δεδομένα και η ροή συνεχίζει μόλις επανέλθει η βάση (αυτό είναι το backpressure).
+        handler.setBackOffFunction((record, exception) ->
+                isInfrastructureProblem(exception) ? new FixedBackOff(5000L, Long.MAX_VALUE) : null);
+        return handler;
+    }
+
+    /** Πρόβλημα υποδομής (βάση/δίκτυο), σε αντίθεση με χαλασμένα δεδομένα. */
+    private static boolean isInfrastructureProblem(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof CannotGetJdbcConnectionException
+                    || c instanceof DataAccessResourceFailureException
+                    || c instanceof TransientDataAccessException
+                    || c instanceof java.sql.SQLTransientException
+                    || c instanceof java.net.ConnectException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

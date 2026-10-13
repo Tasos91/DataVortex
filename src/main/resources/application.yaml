@@ -6,9 +6,14 @@
     # 1. Βάση Δεδομένων (PostgreSQL)
     # ----------------------------------------------------
     datasource:
-      url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:bigdata_db}
+      # reWriteBatchedInserts: ο driver ενώνει τα batched inserts σε ένα statement
+      url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:bigdata_db}?reWriteBatchedInserts=true
       username: ${DB_USER:postgres}
       password: ${DB_PASS:postgres}
+      hikari:
+        # Ένα connection ανά consumer thread (concurrency) και ένα για το Flyway/υπόλοιπα
+        maximum-pool-size: ${DB_POOL_SIZE:6}
+
     # Το schema το φτιάχνει το Flyway (db/migration), ΟΧΙ το Hibernate: ο πίνακας είναι
     # TimescaleDB hypertable με συμπίεση, πράγματα που το ddl-auto δεν ξέρει να φτιάξει
     # και θα τα χαλούσε.
@@ -107,6 +112,13 @@
   # ----------------------------------------------------
   # 5. Monitoring (Prometheus Metrics & Actuator)
   # ----------------------------------------------------
+  # Δικές μας ρυθμίσεις (όχι του Spring)
+  datavortex:
+    # Πόσες γραμμές ανά INSERT statement. Το batch του Kafka (max.poll.records) κόβεται
+    # σε κομμάτια αυτού του μεγέθους· 9 στήλες x 1000 = 9000 παράμετροι, άνετα κάτω από
+    # το όριο των 65535 παραμέτρων του Postgres.
+    batch-rows: ${DB_BATCH_ROWS:1000}
+
   management:
     endpoints:
       web:

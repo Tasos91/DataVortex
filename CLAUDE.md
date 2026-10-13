@@ -19,9 +19,12 @@ TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
 - `controller/DashboardController`: `/dashboard` (HTML) και `/dashboard/api/stats`.
 - `service/FileStreamingService`: CSV, JSON αρχείο και inline `payload` → Protobuf → Kafka.
 - `service/KafkaTopicService`: ελέγχει/δημιουργεί το topic του request (fail-fast, με cache).
+- `service/IngestedRecordWriter`: γράφει το batch στη βάση με ΕΝΑ multi-row INSERT
+  (`ON CONFLICT DO NOTHING`), με fallback μία-μία γραμμή όταν αποτύχει το batch.
 - `mapping/JsonPathResolver` και `mapping/RecordMapper`: εφαρμόζουν τα `fieldMappings` στο payload.
-- `config/KafkaConsumerConfig`: bean `Consumer<Message<List<IngestedRecord>>> consumeData` — **batch** consumer
-  (Spring Cloud Stream). Τα Kafka metadata (topic/partition/offset) έρχονται ως Lists στα headers.
+- `config/KafkaConsumerConfig`: bean `Consumer<Message<List<Object>>> consumeData` — **batch** consumer
+  (Spring Cloud Stream) → `IngestedRecordWriter`. Τα Kafka metadata (topic/partition/offset/timestamp)
+  έρχονται ως Lists στα headers.
 - `config/KafkaErrorHandlingConfig`: retries και DLQ. Το DLQ `KafkaTemplate` ΔΕΝ είναι bean επίτηδες — ένα δεύτερο
   `KafkaTemplate`/`ProducerFactory` στο context κάνει το KafkaAutoConfiguration να μην φτιάξει το κανονικό.
 - `service/KafkaConsumerService`: ολόκληρο σε σχόλια, νεκρός κώδικας· μην τον ξαναενεργοποιείς χωρίς λόγο.
@@ -52,8 +55,12 @@ TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
   `concurrency` (default 3) <= partitions, αλλιώς τα παραπανίσια threads μένουν άεργα.
 - **Poison pill:** `ErrorHandlingDeserializer` + `DefaultErrorHandler` + `DeadLetterPublishingRecoverer`. Χαλασμένο
   μήνυμα → `dlq.ingest` αυτούσιο (με headers το αρχικό topic/partition/offset) και ο consumer συνεχίζει.
-  Σε batch listener, σκέτο exception στέλνει ΟΛΟ το batch στο DLQ· πέτα `BatchListenerFailedException(msg, index)`
-  για να πάει μόνο το ένα record.
+- **Ο τύπος του consumer είναι `List<Object>`, όχι `List<IngestedRecord>`.** Ένα μήνυμα που δεν διαβάστηκε φτάνει
+  ως `KafkaNull`· με δηλωμένο τύπο record σκάει `ClassCastException` και φεύγει ΟΛΟ το batch (500 καλά μηνύματα)
+  στο DLQ. Αντ' αυτού γράφουμε τα καλά και πετάμε `BatchListenerFailedException(msg, index)` για το ένα χαλασμένο.
+- **Αν πέσει η βάση δεν πάει τίποτα στο DLQ:** ο `setBackOffFunction` δίνει άπειρα retries στα σφάλματα
+  υποδομής (`CannotGetJdbcConnectionException`, `DataAccessResourceFailureException`, ...). Τα offsets δεν
+  γίνονται commit, το Kafka κρατά τα δεδομένα, και η ροή συνεχίζει μόλις επανέλθει η βάση.
 - Στο Spring Boot 4 το MVC χρησιμοποιεί Jackson 3, ενώ ο κώδικας χρησιμοποιεί `com.fasterxml` (Jackson 2). Γι' αυτό το
   `payload` στο DTO είναι `Object` και όχι `JsonNode`· μην το αλλάξεις.
 
@@ -72,6 +79,11 @@ TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
   του Kafka είναι μοναδικό, οπότε `INSERT ... ON CONFLICT DO NOTHING` αρκεί — δοκιμασμένο ότι δουλεύει και σε
   συμπιεσμένο chunk. Το `event_time` ΠΡΕΠΕΙ να είναι το timestamp του μηνύματος Kafka (σταθερό σε κάθε
   επανάληψη), όχι `now()`, αλλιώς το dedup δεν πιάνει.
+- **Γράψιμο:** ένα multi-row `INSERT` ανά batch (`datavortex.batch-rows`, default 1000 γραμμές/statement) και
+  `reWriteBatchedInserts=true` στο JDBC URL. Αν το batch αποτύχει, ξαναδοκιμάζεται μία-μία γραμμή ώστε να
+  περάσουν οι υπόλοιπες· μια γραμμή που απορρίπτεται από τη βάση λογίζεται ως ERROR με topic/partition/offset.
+- `lat`/`lon` είναι `optional` στο proto: αν ο χρήστης δεν τα χαρτογραφήσει, στη βάση μπαίνει NULL και όχι 0.0.
+  Γι' αυτό ο writer χρησιμοποιεί `hasLat()`/`hasLon()`.
 - Το TimescaleDB απαιτεί τη διάσταση χρόνου σε κάθε unique index, και τα `segmentby` columns πρέπει να είναι
   μέσα στο unique index· γι' αυτό το `segmentby` είναι μόνο `topic` και όχι `topic, source_id`.
 - ΔΕΝ υπάρχει retention policy (θα έσβηνε δεδομένα). Οδηγία για το πώς μπαίνει: στο V1 migration.
@@ -84,6 +96,12 @@ TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
   Η εφαρμογή ΔΕΝ ξεκινά χωρίς τη βάση (το Flyway τρέχει στο startup).
 - Τα topics ΔΕΝ δημιουργούνται αυτόματα, ούτε από τον broker ούτε από τον binder. Είτε φτιάξ' το με
   `kafka-topics --create`, είτε στείλε `createTopicIfMissing: true`.
+
+## Μετρημένες αποδόσεις (i3-8100, 4 πυρήνες, όλα στο ίδιο μηχάνημα)
+- 100.000 μηνύματα: publish 8,5s· αποθήκευση ολοκληρωμένη σε 12s συνολικά (~11.400 rows/s).
+- Μέσο batch ~467 μηνύματα, 214 batches.
+- Πλήρες replay του topic: 0 νέες γραμμές (120.003 πριν και μετά), 121.386 διπλά απορρίφθηκαν από τη βάση.
+- Βάση κάτω για 25s: 0 μηνύματα στο DLQ, όλα γράφτηκαν μόλις επανήλθε.
 
 ## Στυλ
 - Σχόλια και μηνύματα log στα ελληνικά (όπως ο υπάρχων κώδικας). Lombok `@Slf4j` όπου ήδη χρησιμοποιείται.
