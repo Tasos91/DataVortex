@@ -49,8 +49,16 @@ public class ApiConfig {
         return manager;
     }
 
+    /**
+     * ETag μόνο στα API: το filter κρατά την απάντηση στη μνήμη για να υπολογίσει hash, και
+     * σε στατικά αρχεία αυτό χαλάει την απευθείας αποστολή (η welcome page γύριζε κενή).
+     * Τα στατικά έχουν άλλωστε ήδη Last-Modified.
+     */
     @Bean
-    public ShallowEtagHeaderFilter etagFilter() {
-        return new ShallowEtagHeaderFilter();
+    public org.springframework.boot.web.servlet.FilterRegistrationBean<ShallowEtagHeaderFilter> etagFilter() {
+        var registration = new org.springframework.boot.web.servlet.FilterRegistrationBean<>(
+                new ShallowEtagHeaderFilter());
+        registration.addUrlPatterns("/api/*");
+        return registration;
     }
 }

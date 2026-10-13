@@ -59,15 +59,17 @@ public class ApiController {
 
     /** Ο πίνακας που τροφοδοτεί clustering και classification στο analytics-ui-service. */
     @GetMapping("/matrix")
-    @Cacheable(value = "matrix", key = "#source + '|' + #fields + '|' + #from + '|' + #to + '|' + #bucket")
+    @Cacheable(value = "matrix",
+            key = "#source + '|' + #fields + '|' + #from + '|' + #to + '|' + #bucket + '|' + #agg")
     public Dtos.Matrix matrix(@RequestParam String source,
                               @RequestParam(required = false) List<String> fields,
                               @RequestParam(required = false) Instant from,
                               @RequestParam(required = false) Instant to,
-                              @RequestParam(required = false, defaultValue = "auto") String bucket) {
+                              @RequestParam(required = false, defaultValue = "auto") String bucket,
+                              @RequestParam(required = false, defaultValue = "avg") String agg) {
         Instant[] range = range(from, to);
         Buckets b = Buckets.of(bucket, range[0], range[1]);
-        return repo.matrix(source, fields, range[0], range[1], b);
+        return repo.matrix(source, fields, range[0], range[1], b, agg);
     }
 
     @GetMapping("/rates")
