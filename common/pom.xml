@@ -10,7 +10,7 @@
 
 	<artifactId>common</artifactId>
 	<name>common</name>
-	<description>Το Protobuf σχήμα των μηνυμάτων, κοινό για όλα τα services</description>
+	<description>Το Protobuf σχήμα των μηνυμάτων και τα migrations της βάσης, κοινά για όλους</description>
 
 	<dependencies>
 		<dependency>

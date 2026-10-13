@@ -13,7 +13,19 @@ TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
       `analytics-ui-service` (σκελετός). Τα δύο τελευταία γεμίζουν στα Β4/Β5.
 - [x] **Β4 api-service** — read-only REST, continuous aggregates, keyset pagination, cache, ETag.
 - [x] **Β5 analytics-ui-service** — UI, 3 προφίλ ανάλυσης, ML πυρήνας χωρίς εξαρτήσεις, 40 unit tests.
-- [ ] **Β6 integration tests** — Testcontainers για API↔DB, service-to-service.
+- [ ] **Β6 integration tests** — ΞΕΚΙΝΗΣΕ, ημιτελές. ΕΓΙΝΑΝ: τα migrations μετακόμισαν στο `common`
+      (ταξιδεύουν με το jar, ώστε ingestion και tests να χτίζουν το ΙΔΙΟ schema — επαληθεύτηκε ότι
+      το Flyway τα βρίσκει από το jar), και μπήκαν τα testcontainers deps + BOM στο parent.
+      ΠΡΟΣΟΧΗ: στο Testcontainers 2.x τα artifacts λέγονται `testcontainers-postgresql` και
+      `testcontainers-junit-jupiter` (όχι `postgresql`/`junit-jupiter`), και το Boot ορίζει την
+      έκδοση αλλά ΔΕΝ εισάγει το BOM.
+      ΜΕΝΟΥΝ να γραφτούν: (1) `api-service`: Testcontainers με `timescale/timescaledb:2.30.2-pg17`
+      (`asCompatibleSubstituteFor("postgres")`) + Flyway + MockMvc — έλεγχος /sources, /series
+      (avg/stddev από sum,sum_sq), /matrix με agg=avg|max, και keyset που περπατά σελίδες χωρίς
+      κενά ή επαναλήψεις· (2) `ingestion-service`: ο writer σε πραγματική βάση — τα 3 tables με ένα
+      statement, απόρριψη διπλών, και ότι το CAGG δείχνει τα δεδομένα· (3) `analytics-ui-service`:
+      στήσιμο μικρού HTTP stub (JDK HttpServer) στο `datavortex.api-base-url` και έλεγχος ότι η
+      ανάλυση περνά σωστά όλο το HTTP συμβόλαιο.
 - [ ] **Β7 τελικό πέρασμα βελτιστοποίησης** — απόδοση, αρχιτεκτονική, UX.
 
 ## Εντολές (το μηχάνημα έχει αργή CPU, 4 πυρήνες: τρέχε το ελάχιστο)
