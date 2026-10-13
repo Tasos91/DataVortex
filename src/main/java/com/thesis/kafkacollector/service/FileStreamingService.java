@@ -5,6 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.thesis.kafkacollector.dto.IngestionRequest;
 import com.thesis.kafkacollector.mapping.RecordMapper;
 import com.thesis.kafkacollector.proto.IngestedRecordProto;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -27,6 +30,7 @@ public class FileStreamingService {
     // Το KafkaProtobufSerializer γράφει το schema στο Schema Registry και στέλνει το record με το schema id
     private final KafkaTemplate<String, IngestedRecordProto.IngestedRecord> kafkaTemplate;
     private final KafkaTopicService topicService;
+    private final MeterRegistry registry;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     // Το topic που χρησιμοποιείται όταν το request δεν ορίζει δικό του
@@ -34,9 +38,10 @@ public class FileStreamingService {
     private String defaultTopic;
 
     public FileStreamingService(KafkaTemplate<String, IngestedRecordProto.IngestedRecord> kafkaTemplate,
-                                KafkaTopicService topicService) {
+                                KafkaTopicService topicService, MeterRegistry registry) {
         this.kafkaTemplate = kafkaTemplate;
         this.topicService = topicService;
+        this.registry = registry;
     }
 
     /**
@@ -88,7 +93,7 @@ public class FileStreamingService {
                 }
             }
         }
-        return finish(topic, "CSV", read + skipped, read, skipped, failed);
+        return finish(topic, "csv", read + skipped, read, skipped, failed);
     }
 
     /**
@@ -115,7 +120,7 @@ public class FileStreamingService {
             send(topic, request, root, mappings, failed);
             read++;
         }
-        return finish(topic, "Payload", read, read, 0, failed);
+        return finish(topic, "payload", read, read, 0, failed);
     }
 
     /**
@@ -162,7 +167,7 @@ public class FileStreamingService {
             throw new IllegalArgumentException("Το σώμα είναι κενό. Η πρώτη γραμμή πρέπει να έχει τις "
                     + "ρυθμίσεις (sourceId, topic, keyField, fieldMappings) και οι επόμενες τις εγγραφές.");
         }
-        return finish(topic, "NDJSON", read + skipped, read, skipped, failed);
+        return finish(topic, "ndjson", read + skipped, read, skipped, failed);
     }
 
     public IngestResult processJsonStream(IngestionRequest request) throws Exception {
@@ -201,7 +206,7 @@ public class FileStreamingService {
                 token = parser.nextToken();
             }
         }
-        return finish(topic, "JSON αρχείο", read + skipped, read, skipped, failed);
+        return finish(topic, "json-file", read + skipped, read, skipped, failed);
     }
 
     /**
@@ -210,9 +215,18 @@ public class FileStreamingService {
      * producer: αν έπεφτε το Kafka, ο client είχε 200 και τα δεδομένα δεν υπήρχαν πουθενά.
      */
     private IngestResult finish(String topic, String what, int total, int read, int skipped, AtomicInteger failed) {
+        long started = System.nanoTime();
         kafkaTemplate.flush();
         int accepted = read - failed.get();
         IngestResult result = new IngestResult(total, accepted, skipped);
+
+        Timer.builder("datavortex.ingest.flush").tag("mode", what)
+                .description("Αναμονή για τα acks του Kafka στο τέλος μιας εισαγωγής")
+                .register(registry)
+                .record(System.nanoTime() - started, java.util.concurrent.TimeUnit.NANOSECONDS);
+        count(what, "accepted", accepted);
+        count(what, "failed", result.failed());
+        count(what, "skipped", skipped);
         if (result.failed() > 0 || skipped > 0) {
             log.warn("{}: {} εγγραφές, {} στο Kafka, {} απέτυχαν, {} άκυρες (topic {})",
                     what, total, accepted, result.failed(), skipped, topic);
@@ -220,6 +234,16 @@ public class FileStreamingService {
             log.info("{}: {} μηνύματα στο topic {}", what, accepted, topic);
         }
         return result;
+    }
+
+    private void count(String mode, String result, int amount) {
+        if (amount > 0) {
+            Counter.builder("datavortex.ingest.records")
+                    .description("Εγγραφές που μπήκαν στον σωλήνα, ανά τρόπο εισαγωγής και αποτέλεσμα")
+                    .tags("mode", mode, "result", result)
+                    .register(registry)
+                    .increment(amount);
+        }
     }
 
     /**

@@ -129,13 +129,24 @@
     endpoints:
       web:
         exposure:
-          include: health,info,prometheus,metrics
+          include: health,info,prometheus,metrics,loggers
     endpoint:
       prometheus:
         enabled: true
     metrics:
       export:
         prometheus:
+          enabled: true
+      # Ιστογράμματα μόνο όπου θέλουμε p99 (κάθε ιστόγραμμα κοστίζει σε μνήμη και σε bytes
+      # προς το Prometheus, γι' αυτό δεν τα ανοίγουμε για όλα).
+      distribution:
+        percentiles-histogram:
+          http.server.requests: true
+          datavortex.db.insert: true
+          datavortex.ingest.flush: true
+    prometheus:
+      metrics:
+        export:
           enabled: true
 
   server:

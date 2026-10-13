@@ -5,6 +5,20 @@ Protobuf και τα στέλνει στο Kafka· ένας batch consumer τα 
 TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
 Η υπόλοιπη περιγραφή εδώ είναι μόνο ό,τι δεν φαίνεται εύκολα από τον κώδικα.
 
+## Πλάνο και πρόοδος (ΔΙΑΒΑΣΕ ΠΡΩΤΑ ΑΥΤΟ — συνέχισε από το πρώτο ανολοκλήρωτο)
+Μεγάλη επέκταση σε 7 βήματα, ένα branch ανά βήμα: branch -> commit -> push -> merge στο master -> push.
+- [x] **Β1 μετρικές** — Micrometer/Prometheus σε όλα τα επίπεδα, consumer lag, Grafana dashboard (provisioned).
+- [ ] **Β2 καθαρισμός lat/lon** — φεύγουν από proto, βάση (migration), mapper, writer, tests. Όλα τα πεδία
+      του χρήστη πάνε πλέον μόνο στο `fields` jsonb.
+- [ ] **Β3 τρία services (multi-module Maven)** — `common`, `ingestion-service` (ό,τι υπάρχει σήμερα),
+      `api-service`, `analytics-ui-service`.
+- [ ] **Β4 api-service** — read-only REST πάνω από τη βάση, keyset pagination, cache, continuous aggregates.
+      ΜΟΝΟ αυτό αγγίζει τη βάση στο read path.
+- [ ] **Β5 analytics-ui-service** — UI που καλεί το api-service· clustering + classification + ανίχνευση
+      ανωμαλιών, με ΔΙΑΦΟΡΕΤΙΚΗ μεταχείριση ανά τύπο δεδομένων (profiles: ai-telemetry, weather, generic).
+- [ ] **Β6 integration tests** — Testcontainers για API↔DB, service-to-service.
+- [ ] **Β7 τελικό πέρασμα βελτιστοποίησης** — απόδοση, αρχιτεκτονική, UX.
+
 ## Εντολές (το μηχάνημα έχει αργή CPU, 4 πυρήνες: τρέχε το ελάχιστο)
 - Η default `java` είναι 11. Πάντα: `export JAVA_HOME=~/.jdks/corretto-21.0.2`
 - Compile: `./mvnw -o -q compile`  (offline, χωρίς `clean`)
@@ -118,6 +132,23 @@ TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
 - NDJSON 200.000 εγγραφές (25MB): 11,5s το publish, 31s μέχρι να είναι όλα στη βάση, και η μνήμη της JVM
   ανέβηκε μόνο 85MB (548 -> 634MB).
 - 8 ταυτόχρονα requests με όριο 4: 4 x 200 και 4 x 429.
+
+## Μετρικές (Prometheus/Grafana)
+- `/actuator/prometheus` σε κάθε service. Το Prometheus (`prometheus.yml`) σκρέιπαρει και τα τρία
+  (8080 ingestion, 8082 api, 8085 analytics-ui)· όσα δεν τρέχουν φαίνονται DOWN, δεν πειράζει.
+- Σε Linux χρειάζεται `extra_hosts: host.docker.internal:host-gateway` στο prometheus, αλλιώς δεν βλέπει
+  τα Java services που τρέχουν έξω από το Docker.
+- Grafana στο `localhost:3000` (admin/admin). Το datasource και το dashboard είναι **provisioned**
+  (`grafana/provisioning/`, `grafana/dashboards/datavortex.json`) — δεν χρειάζεται κλικ.
+- Δικές μας μετρικές: `datavortex.ingest.records{mode,result}`, `datavortex.ingest.flush{mode}`,
+  `datavortex.consume.records{result}`, `datavortex.consume.batch.size`, `datavortex.db.insert`,
+  `datavortex.db.rows{result}`, `datavortex.kafka.consumer.lag` (σύνολο) και
+  `datavortex.kafka.consumer.lag.records{topic}` (ανά topic).
+- Προσοχή στα ονόματα στο Prometheus: ένα gauge που λέγεται `...lag.total` εξάγεται ως
+  `datavortex_kafka_consumer_lag` (το Micrometer κόβει το `_total` για να μη μοιάζει με counter),
+  και το `baseUnit("records")` προσθέτει `_records`.
+- **Το consumer lag είναι η μετρική-κλειδί.** Υπολογίζεται με AdminClient ανά 15s, και ΜΟΝΟ για topics
+  που ταιριάζουν στο pattern του consumer: παλιά committed offsets άλλων topics έδειχναν μόνιμο ψεύτικο lag.
 
 ## Στυλ
 - Σχόλια και μηνύματα log στα ελληνικά (όπως ο υπάρχων κώδικας). Lombok `@Slf4j` όπου ήδη χρησιμοποιείται.

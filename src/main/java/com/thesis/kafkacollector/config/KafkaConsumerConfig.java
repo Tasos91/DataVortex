@@ -3,6 +3,9 @@ package com.thesis.kafkacollector.config;
 import com.thesis.kafkacollector.proto.IngestedRecordProto;
 import com.thesis.kafkacollector.service.DashboardMetricsService;
 import com.thesis.kafkacollector.service.IngestedRecordWriter;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
@@ -22,10 +25,20 @@ public class KafkaConsumerConfig {
     private static final Logger log = LoggerFactory.getLogger(KafkaConsumerConfig.class);
     private final DashboardMetricsService metricsService;
     private final IngestedRecordWriter writer;
+    private final DistributionSummary batchSize;
+    private final Counter consumedOk;
+    private final Counter consumedUnreadable;
 
-    public KafkaConsumerConfig(DashboardMetricsService metricsService, IngestedRecordWriter writer) {
+    public KafkaConsumerConfig(DashboardMetricsService metricsService, IngestedRecordWriter writer,
+                               MeterRegistry registry) {
         this.metricsService = metricsService;
         this.writer = writer;
+        this.batchSize = DistributionSummary.builder("datavortex.consume.batch.size")
+                .description("Μηνύματα ανά poll· αν είναι μικρό, τα inserts είναι πολλά και μικρά")
+                .register(registry);
+        this.consumedOk = Counter.builder("datavortex.consume.records").tag("result", "ok").register(registry);
+        this.consumedUnreadable = Counter.builder("datavortex.consume.records")
+                .tag("result", "unreadable").register(registry);
     }
 
     /**
@@ -68,6 +81,7 @@ public class KafkaConsumerConfig {
                     if (badIndex < 0) {
                         badIndex = i; // το πρώτο χαλασμένο: αυτό θα πάει στο DLQ
                     }
+                    consumedUnreadable.increment();
                     log.error("Μη αναγνώσιμο μήνυμα από {}-{} offset {}: πάει στο DLQ.",
                             at(topics, i), at(partitions, i), at(offsets, i));
                     continue;
@@ -96,6 +110,8 @@ public class KafkaConsumerConfig {
             // Πρώτα γράφουμε τα καλά, και μόνο μετά σηματοδοτούμε το χαλασμένο: έτσι δεν
             // χάνεται τίποτα, και η επανάληψη των υπόλοιπων είναι ακίνδυνη (idempotent insert).
             int written = writer.write(rows);
+            batchSize.record(records.size());
+            consumedOk.increment(rows.size());
             metricsService.recordMessages(rows.size(), lastPayload);
             log.info("Batch: {} μηνύματα από {}, γράφτηκαν {} (διπλά: {})",
                     rows.size(), at(topics, 0), written, rows.size() - written);

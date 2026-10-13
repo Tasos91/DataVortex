@@ -4,6 +4,9 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Struct;
 import com.google.protobuf.util.JsonFormat;
 import com.thesis.kafkacollector.proto.IngestedRecordProto;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
@@ -40,6 +43,10 @@ public class IngestedRecordWriter {
             .includingDefaultValueFields();
 
     private final JdbcTemplate jdbc;
+    private final Timer insertTimer;
+    private final Counter rowsWritten;
+    private final Counter rowsDuplicate;
+    private final Counter rowsRejected;
     /** Το SQL ανά μέγεθος batch· φτιάχνεται μία φορά και ξαναχρησιμοποιείται. */
     private final ConcurrentHashMap<Integer, String> sqlCache = new ConcurrentHashMap<>();
     private final AtomicLong totalWritten = new AtomicLong();
@@ -48,8 +55,22 @@ public class IngestedRecordWriter {
     @Value("${datavortex.batch-rows:1000}")
     private int batchRows;
 
-    public IngestedRecordWriter(JdbcTemplate jdbc) {
+    public IngestedRecordWriter(JdbcTemplate jdbc, MeterRegistry registry) {
         this.jdbc = jdbc;
+        this.insertTimer = Timer.builder("datavortex.db.insert")
+                .description("Διάρκεια ενός multi-row INSERT")
+                .publishPercentileHistogram()
+                .register(registry);
+        this.rowsWritten = rows(registry, "written");
+        this.rowsDuplicate = rows(registry, "duplicate");
+        this.rowsRejected = rows(registry, "rejected");
+    }
+
+    private static Counter rows(MeterRegistry registry, String result) {
+        return Counter.builder("datavortex.db.rows")
+                .description("Γραμμές που πήγαν στη βάση, ανά αποτέλεσμα")
+                .tag("result", result)
+                .register(registry);
     }
 
     /**
@@ -75,11 +96,16 @@ public class IngestedRecordWriter {
             return 0;
         }
         int written = 0;
+        long started = System.nanoTime();
         for (int start = 0; start < rows.size(); start += batchRows) {
             List<Row> chunk = rows.subList(start, Math.min(start + batchRows, rows.size()));
             written += writeChunk(chunk);
         }
+        insertTimer.record(System.nanoTime() - started, java.util.concurrent.TimeUnit.NANOSECONDS);
         totalWritten.addAndGet(written);
+        rowsWritten.increment(written);
+        // Ό,τι δεν γράφτηκε και δεν απορρίφθηκε, ήταν διπλό (ON CONFLICT DO NOTHING)
+        rowsDuplicate.increment(Math.max(0, rows.size() - written));
         return written;
     }
 
@@ -120,6 +146,7 @@ public class IngestedRecordWriter {
                     break;
                 }
                 totalSkipped.incrementAndGet();
+                rowsRejected.increment();
                 log.error("Η γραμμή {}-{} offset {} απορρίφθηκε από τη βάση: {}",
                         row.topic(), row.partition(), row.offset(), e.getMessage());
             }
