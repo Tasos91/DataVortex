@@ -76,7 +76,10 @@
 
       # Το custom property που διαβάζει ο FileStreamingService & ο Consumer
       topic:
-        ingestion: ${KAFKA_TOPIC:ais-data}
+        ingestion: ${KAFKA_TOPIC:ais-data}            # default topic όταν το request δεν ορίζει δικό του
+        default-partitions: ${KAFKA_TOPIC_PARTITIONS:6} # partitions για topic που φτιάχνει η εφαρμογή
+        replication-factor: ${KAFKA_TOPIC_REPLICATION:1}
+        cache-ttl-ms: ${KAFKA_TOPIC_CACHE_TTL_MS:30000}  # πόσο κρατάει η cache "το topic υπάρχει"
 
   # ----------------------------------------------------
   # 5. Monitoring (Prometheus Metrics & Actuator)

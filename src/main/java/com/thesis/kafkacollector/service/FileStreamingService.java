@@ -3,7 +3,6 @@ package com.thesis.kafkacollector.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.thesis.kafkacollector.dto.IngestionRequest;
-import com.thesis.kafkacollector.entity.IngestedRecord;
 import com.thesis.kafkacollector.mapping.RecordMapper;
 import com.thesis.kafkacollector.proto.IngestedRecordProto;
 import lombok.extern.slf4j.Slf4j;
@@ -24,18 +23,23 @@ public class FileStreamingService {
 
     // Το KafkaProtobufSerializer γράφει το schema στο Schema Registry και στέλνει το record με το schema id
     private final KafkaTemplate<String, IngestedRecordProto.IngestedRecord> kafkaTemplate;
+    private final KafkaTopicService topicService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    // Όρισε το όνομα του topic (μπορείς να το βάλεις και στο application.properties)
+    // Το topic που χρησιμοποιείται όταν το request δεν ορίζει δικό του
     @Value("${spring.kafka.topic.ingestion:ais-data}")
-    private String topic;
+    private String defaultTopic;
 
-    public FileStreamingService(KafkaTemplate<String, IngestedRecordProto.IngestedRecord> kafkaTemplate) {
+    public FileStreamingService(KafkaTemplate<String, IngestedRecordProto.IngestedRecord> kafkaTemplate,
+                                KafkaTopicService topicService) {
         this.kafkaTemplate = kafkaTemplate;
+        this.topicService = topicService;
     }
 
     public void processCsvStream(IngestionRequest request) throws Exception {
         Map<String, String> mappings = request.getFieldMappings();
+        String topic = resolveTopic(request);
+        int sent = 0;
 
         try (BufferedReader br = Files.newBufferedReader(Paths.get(request.getFilePath()), StandardCharsets.UTF_8)) {
             String headerLine = br.readLine();
@@ -54,23 +58,15 @@ public class FileStreamingService {
                         rawJsonMap.put(headers[i].trim(), values[i].trim());
                     }
 
-                    String payloadJson = objectMapper.writeValueAsString(rawJsonMap);
-
-                    IngestedRecordProto.IngestedRecord record = RecordMapper.map(
-                            request.getSourceId(), payloadJson, objectMapper.valueToTree(rawJsonMap), mappings);
-
-                    // Αποστολή στο Kafka Topic (βάζουμε το SourceId ως κλειδί του μηνύματος)
-                    kafkaTemplate.send(topic, request.getSourceId(), record).whenComplete((result, ex) -> {
-                        if (ex != null) {
-                            log.error("Αποτυχία αποστολής στο Kafka για το sourceId: {}", request.getSourceId(), ex);
-                        }
-                    });
+                    send(topic, request, objectMapper.valueToTree(rawJsonMap), mappings);
+                    sent++;
 
                 } catch (Exception e) {
                     log.warn("Σφάλμα κατά την επεξεργασία της γραμμής CSV: {}. Αιτία: {}", line, e.getMessage());
                 }
             }
         }
+        log.info("CSV: στάλθηκαν {} μηνύματα στο topic {}", sent, topic);
     }
 
     /**
@@ -83,33 +79,25 @@ public class FileStreamingService {
     public int processPayload(IngestionRequest request) throws Exception {
         JsonNode root = objectMapper.valueToTree(request.getPayload());
         Map<String, String> mappings = request.getFieldMappings();
+        String topic = resolveTopic(request);
         int sent = 0;
 
         if (root.isArray()) {
             for (JsonNode element : root) {
-                sendRecord(request, element, mappings);
+                send(topic, request, element, mappings);
                 sent++;
             }
         } else {
-            sendRecord(request, root, mappings);
+            send(topic, request, root, mappings);
             sent++;
         }
         log.info("Payload: στάλθηκαν {} μηνύματα στο topic {}", sent, topic);
         return sent;
     }
 
-    private void sendRecord(IngestionRequest request, JsonNode node, Map<String, String> mappings) throws Exception {
-        IngestedRecordProto.IngestedRecord record = RecordMapper.map(
-                request.getSourceId(), objectMapper.writeValueAsString(node), node, mappings);
-        kafkaTemplate.send(topic, request.getSourceId(), record).whenComplete((result, ex) -> {
-            if (ex != null) {
-                log.error("Αποτυχία αποστολής στο Kafka για το sourceId: {}", request.getSourceId(), ex);
-            }
-        });
-    }
-
     public void processJsonStream(IngestionRequest request) throws Exception {
         Map<String, String> mappings = request.getFieldMappings();
+        String topic = resolveTopic(request);
         log.info("Ξεκινάει η επεξεργασία JSON αρχείου: {}", request.getFilePath());
         log.info("Στόχος Kafka Topic: {}", topic);
 
@@ -130,18 +118,7 @@ public class FileStreamingService {
                 if (token == com.fasterxml.jackson.core.JsonToken.START_OBJECT) {
                     // ΕΣΩΤΕΡΙΚΟ TRY-CATCH
                     try {
-                        Map<String, Object> rawJsonMap = objectMapper.readValue(parser, Map.class);
-
-                        String payloadJson = objectMapper.writeValueAsString(rawJsonMap);
-
-                        IngestedRecordProto.IngestedRecord record = RecordMapper.map(
-                                request.getSourceId(), payloadJson, objectMapper.valueToTree(rawJsonMap), mappings);
-
-                        kafkaTemplate.send(topic, request.getSourceId(), record).whenComplete((result, ex) -> {
-                            if (ex != null) {
-                                log.error("Αποτυχία αποστολής στο Kafka για το sourceId: {}", request.getSourceId(), ex);
-                            }
-                        });
+                        send(topic, request, objectMapper.readTree(parser), mappings);
                         recordCount++;
 
                     } catch (Exception e) {
@@ -154,4 +131,33 @@ public class FileStreamingService {
         log.info("Ολοκληρώθηκε η αποστολή. Στάλθηκαν συνολικά {} μηνύματα στο Kafka!", recordCount);
     }
 
+    /**
+     * Το topic του request, ή το default. Ελέγχεται ότι υπάρχει πριν στείλουμε οτιδήποτε,
+     * ώστε ένα λάθος όνομα να γίνεται αμέσως 400 και να μη κολλάει ο producer.
+     */
+    private String resolveTopic(IngestionRequest request) {
+        String topic = (request.getTopic() != null && !request.getTopic().isBlank())
+                ? request.getTopic().trim()
+                : defaultTopic;
+        topicService.ensureUsable(topic, request.isCreateTopicIfMissing(), request.getPartitions());
+        return topic;
+    }
+
+    /**
+     * Χτίζει το Protobuf record και το στέλνει. Το κλειδί βγαίνει από το keyField του request:
+     * ίδιο κλειδί σημαίνει ίδιο partition, άρα εγγυημένη σειρά για την ίδια οντότητα.
+     * Χωρίς keyField το κλειδί είναι null και τα μηνύματα μοιράζονται σε όλα τα partitions.
+     */
+    private void send(String topic, IngestionRequest request, JsonNode node, Map<String, String> mappings)
+            throws Exception {
+        IngestedRecordProto.IngestedRecord record = RecordMapper.map(
+                request.getSourceId(), objectMapper.writeValueAsString(node), node, mappings);
+        String key = RecordMapper.keyOf(node, request.getKeyField());
+
+        kafkaTemplate.send(topic, key, record).whenComplete((result, ex) -> {
+            if (ex != null) {
+                log.error("Αποτυχία αποστολής στο Kafka (topic {}, sourceId {})", topic, request.getSourceId(), ex);
+            }
+        });
+    }
 }

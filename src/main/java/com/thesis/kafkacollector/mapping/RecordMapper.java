@@ -58,6 +58,22 @@ public final class RecordMapper {
         return builder.build();
     }
 
+    /**
+     * Βγάζει από το record το κλειδί του μηνύματος Kafka, με βάση τη διαδρομή {@code keyField}.
+     *
+     * @return το κλειδί ως String, ή {@code null} όταν δεν ορίστηκε διαδρομή ή δεν βρέθηκε τιμή
+     *         (τότε το Kafka μοιράζει το μήνυμα σε όποιο partition θέλει)
+     */
+    public static String keyOf(JsonNode root, String keyField) {
+        if (keyField == null || keyField.isBlank()) return null;
+        JsonNode node = JsonPathResolver.resolve(root, keyField);
+        if (node == null || node.isNull()) {
+            log.debug("Το keyField '{}' δεν βρήκε τιμή· το μήνυμα φεύγει χωρίς κλειδί.", keyField);
+            return null;
+        }
+        return node.isValueNode() ? node.asText() : node.toString();
+    }
+
     private static double toDouble(JsonNode node) {
         if (node.isNumber()) return node.asDouble();
         if (node.isTextual()) {

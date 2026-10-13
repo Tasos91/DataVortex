@@ -39,6 +39,9 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Κανένα topic δεν δημιουργείται σιωπηλά: ο broker θα το έφτιαχνε με 1 partition,
+      # που σημαίνει μηδενικό παραλληλισμό στον consumer. Τα topics τα φτιάχνει η εφαρμογή.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
     networks:
       - thesis-net
 

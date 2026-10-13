@@ -1,0 +1,97 @@
+package com.thesis.kafkacollector.service;
+
+import lombok.extern.slf4j.Slf4j;
+import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.kafka.config.TopicBuilder;
+import org.springframework.kafka.core.KafkaAdmin;
+import org.springframework.stereotype.Service;
+
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * Ελέγχει ότι το topic που ζήτησε ο χρήστης υπάρχει, πριν στείλουμε έστω και ένα μήνυμα.
+ * <p>
+ * Γιατί χρειάζεται: αν το topic δεν υπάρχει, ο producer μπλοκάρει μέχρι το {@code max.block.ms}
+ * (60s by default) και μετά πετάει TimeoutException — δηλαδή το HTTP request κολλάει για ένα λάθος
+ * που φαίνεται αμέσως. Εδώ αποτυγχάνουμε γρήγορα, με καθαρό μήνυμα.
+ * <p>
+ * Τα ονόματα των topics που υπάρχουν κρατιούνται σε cache για λίγο, ώστε να μη ρωτάμε
+ * τον broker σε κάθε request.
+ */
+@Service
+@Slf4j
+public class KafkaTopicService {
+
+    private final KafkaAdmin kafkaAdmin;
+    private final Map<String, Long> knownTopics = new ConcurrentHashMap<>();
+
+    /** Πόσο κρατάει η cache ενός topic που βρέθηκε (ms). */
+    @Value("${spring.kafka.topic.cache-ttl-ms:30000}")
+    private long cacheTtlMs;
+
+    /** Partitions για topic που φτιάχνουμε εμείς, όταν το request δεν ορίζει αριθμό. */
+    @Value("${spring.kafka.topic.default-partitions:6}")
+    private int defaultPartitions;
+
+    /** Replication factor· με ένα broker μπορεί να είναι μόνο 1. */
+    @Value("${spring.kafka.topic.replication-factor:1}")
+    private int replicationFactor;
+
+    public KafkaTopicService(KafkaAdmin kafkaAdmin) {
+        this.kafkaAdmin = kafkaAdmin;
+    }
+
+    /**
+     * Βεβαιώνεται ότι το topic μπορεί να χρησιμοποιηθεί.
+     *
+     * @param topic           το όνομα του topic
+     * @param createIfMissing αν true και δεν υπάρχει, το δημιουργεί
+     * @param partitions      πόσα partitions όταν το δημιουργεί (null = default)
+     * @throws IllegalArgumentException αν δεν υπάρχει και δεν ζητήθηκε δημιουργία
+     */
+    public void ensureUsable(String topic, boolean createIfMissing, Integer partitions) {
+        Long cachedAt = knownTopics.get(topic);
+        if (cachedAt != null && System.currentTimeMillis() - cachedAt < cacheTtlMs) {
+            return;
+        }
+
+        if (exists(topic)) {
+            knownTopics.put(topic, System.currentTimeMillis());
+            return;
+        }
+
+        if (!createIfMissing) {
+            throw new IllegalArgumentException("Το topic '" + topic + "' δεν υπάρχει. Δημιούργησέ το πρώτα, "
+                    + "ή στείλε \"createTopicIfMissing\": true (προαιρετικά και \"partitions\": N) στο request.");
+        }
+
+        int wanted = (partitions != null && partitions > 0) ? partitions : defaultPartitions;
+        kafkaAdmin.createOrModifyTopics(TopicBuilder.name(topic)
+                .partitions(wanted)
+                .replicas(replicationFactor)
+                .build());
+        knownTopics.put(topic, System.currentTimeMillis());
+        log.info("Δημιουργήθηκε το topic '{}' με {} partitions.", topic, wanted);
+    }
+
+    private boolean exists(String topic) {
+        try {
+            return kafkaAdmin.describeTopics(topic).containsKey(topic);
+        } catch (Exception e) {
+            if (hasCause(e, UnknownTopicOrPartitionException.class)) {
+                return false;
+            }
+            // Πρόβλημα επικοινωνίας με τον broker: δεν το μπερδεύουμε με "δεν υπάρχει το topic".
+            throw new IllegalStateException("Αδύνατη η επικοινωνία με τον Kafka broker: " + e.getMessage(), e);
+        }
+    }
+
+    private static boolean hasCause(Throwable t, Class<? extends Throwable> type) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (type.isInstance(c)) return true;
+        }
+        return false;
+    }
+}

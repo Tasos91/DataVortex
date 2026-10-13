@@ -16,12 +16,14 @@ Protobuf και τα στέλνει στο Kafka· ένας consumer τα δια
 ## Δομή (`com.thesis.kafkacollector`)
 - `controller/IngestionController`: `POST /api/v1/upload` (το μόνο write endpoint).
 - `controller/DashboardController`: `/dashboard` (HTML) και `/dashboard/api/stats`.
-- `service/FileStreamingService`: CSV, JSON αρχείο και inline `payload` → Protobuf → Kafka (`KafkaTemplate<String, byte[]>`).
+- `service/FileStreamingService`: CSV, JSON αρχείο και inline `payload` → Protobuf → Kafka.
+- `service/KafkaTopicService`: ελέγχει/δημιουργεί το topic του request (fail-fast, με cache).
 - `mapping/JsonPathResolver` και `mapping/RecordMapper`: εφαρμόζουν τα `fieldMappings` στο payload.
 - `config/KafkaConsumerConfig`: bean `Consumer<byte[]> consumeData` (Spring Cloud Stream) → `DashboardMetricsService`.
 - `service/KafkaConsumerService`: ολόκληρο σε σχόλια, νεκρός κώδικας· μην τον ξαναενεργοποιείς χωρίς λόγο.
 - `entity/IngestedRecord` + `repository/`: JPA για Postgres (πίνακας `ingested_records`). Προς το παρόν ο consumer ΔΕΝ γράφει εκεί.
-- `dto/IngestionRequest`: `sourceId`, `fileType`, `filePath`, `payload`, `fieldMappings`.
+- `dto/IngestionRequest`: `sourceId`, `fileType`, `filePath`, `topic`, `createTopicIfMissing`, `partitions`,
+  `keyField`, `payload`, `fieldMappings`.
 
 ## Βασικοί κανόνες σχεδιασμού
 - Το μήνυμα στο Kafka είναι **Protobuf μέσω Schema Registry** (`KafkaProtobufSerializer`/`KafkaProtobufDeserializer`,
@@ -33,6 +35,12 @@ Protobuf και τα στέλνει στο Kafka· ένας consumer τα δια
   `src/main/proto/ingested_record.proto`. Προσθήκη πεδίου = νέος αριθμός, ποτέ μην αλλάζεις/ξαναχρησιμοποιείς υπάρχοντες.
 - `fieldMappings`: `{"ΟνομαΠεδίου": "$.διαδρομή.στο.json"}`. Τα ονόματα `lat`/`lon` γεμίζουν τα σταθερά πεδία, όλα τα άλλα
   πάνε στο `fields`. Σκέτο όνομα (χωρίς `$`) = κλειδί πρώτου επιπέδου (CSV). Δεν βρέθηκε τιμή → παράλειψη + warn, όχι σφάλμα.
+- **Topic ανά request:** `"topic": "..."` στο request· αν λείπει, το default του `application.yaml`. Αν το topic δεν
+  υπάρχει → 400 αμέσως (ο broker έχει `auto.create.topics.enable=false`, αλλιώς θα το έφτιαχνε με 1 partition).
+  Με `"createTopicIfMissing": true` το φτιάχνει η εφαρμογή (`partitions`, default 6).
+- **Partition key:** `"keyField": "$.vessel.mmsi"`. Ίδιο κλειδί → ίδιο partition → εγγυημένη σειρά για την οντότητα.
+  Χωρίς `keyField` το κλειδί είναι `null` και τα μηνύματα μοιράζονται (μέγιστο throughput, καμία εγγύηση σειράς).
+  ΜΗΝ βάλεις ξανά το `sourceId` ως κλειδί: στέλνει τα πάντα σε ένα partition και μηδενίζει τον παραλληλισμό.
 - Στο Spring Boot 4 το MVC χρησιμοποιεί Jackson 3, ενώ ο κώδικας χρησιμοποιεί `com.fasterxml` (Jackson 2). Γι' αυτό το
   `payload` στο DTO είναι `Object` και όχι `JsonNode`· μην το αλλάξεις.
 
@@ -41,7 +49,8 @@ Protobuf και τα στέλνει στο Kafka· ένας consumer τα δια
   Όλα με env overrides· `ddl-auto: update`.
 - `docker-compose.yml` (στη ρίζα): postgres:15, kafka (cp 7.6.0, KRaft), schema-registry (:8081, ΑΠΑΡΑΙΤΗΤΟ για producer και consumer), prometheus, grafana.
   Δεν έχει όρια μνήμης. Ξεκίνα μόνο ό,τι χρειάζεται: `docker compose up -d postgres kafka schema-registry`.
-- Το topic δεν δημιουργείται αυτόματα (`auto-create-topics: false`)· πρέπει να υπάρχει πριν την αποστολή.
+- Τα topics ΔΕΝ δημιουργούνται αυτόματα, ούτε από τον broker ούτε από τον binder. Είτε φτιάξ' το με
+  `kafka-topics --create`, είτε στείλε `createTopicIfMissing: true`.
 
 ## Στυλ
 - Σχόλια και μηνύματα log στα ελληνικά (όπως ο υπάρχων κώδικας). Lombok `@Slf4j` όπου ήδη χρησιμοποιείται.
