@@ -16,8 +16,8 @@ import java.util.Map;
  * Μετατρέπει ένα JSON record σε Protobuf {@link IngestedRecordProto.IngestedRecord}
  * με βάση τα field mappings που έδωσε ο χρήστης: {@code "ΟνομαΠεδίου": "$.διαδρομή.στο.json"}.
  * <p>
- * Τα ονόματα "lat" και "lon" γεμίζουν τα σταθερά πεδία lat/lon (όπως πριν).
- * Όλα τα υπόλοιπα μπαίνουν στο δυναμικό map {@code fields}.
+ * ΟΛΑ τα πεδία μπαίνουν στο δυναμικό map {@code fields}· κανένα όνομα δεν έχει ξεχωριστή
+ * μεταχείριση, ώστε το σχήμα να μη ξέρει τίποτα για το νόημα των δεδομένων.
  */
 public final class RecordMapper {
 
@@ -46,13 +46,7 @@ public final class RecordMapper {
                     continue;
                 }
 
-                if ("lat".equalsIgnoreCase(name)) {
-                    builder.setLat(toDouble(node));
-                } else if ("lon".equalsIgnoreCase(name)) {
-                    builder.setLon(toDouble(node));
-                } else {
-                    builder.putFields(name, toValue(node));
-                }
+                builder.putFields(name, toValue(node));
             }
         }
         return builder.build();
@@ -72,18 +66,6 @@ public final class RecordMapper {
             return null;
         }
         return node.isValueNode() ? node.asText() : node.toString();
-    }
-
-    private static double toDouble(JsonNode node) {
-        if (node.isNumber()) return node.asDouble();
-        if (node.isTextual()) {
-            try {
-                return Double.parseDouble(node.asText().trim());
-            } catch (NumberFormatException ignored) {
-                // πέφτει στο 0.0, όπως και πριν
-            }
-        }
-        return 0.0;
     }
 
     static Value toValue(JsonNode node) {

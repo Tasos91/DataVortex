@@ -30,12 +30,13 @@ import java.util.concurrent.atomic.AtomicLong;
 @Slf4j
 public class IngestedRecordWriter {
 
-    private static final int COLUMNS = 9;
+    /** event_time, topic, kafka_partition, kafka_offset, source_id, fields, payload */
+    private static final int COLUMNS = 7;
     private static final String INSERT_PREFIX = """
             INSERT INTO ingested_records
-                (event_time, topic, kafka_partition, kafka_offset, source_id, lat, lon, fields, payload)
+                (event_time, topic, kafka_partition, kafka_offset, source_id, fields, payload)
             VALUES """;
-    private static final String VALUES_TUPLE = "(?,?,?,?,?,?,?,?::jsonb,?::jsonb)";
+    private static final String VALUES_TUPLE = "(?,?,?,?,?,?::jsonb,?::jsonb)";
     private static final String ON_CONFLICT = " ON CONFLICT DO NOTHING";
 
     private static final JsonFormat.Printer JSON = JsonFormat.printer()
@@ -82,8 +83,6 @@ public class IngestedRecordWriter {
                       int partition,
                       long offset,
                       String sourceId,
-                      Double lat,
-                      Double lon,
                       String fieldsJson,
                       String payloadJson) {
     }
@@ -163,8 +162,6 @@ public class IngestedRecordWriter {
         args[i++] = row.partition();
         args[i++] = row.offset();
         args[i++] = row.sourceId();
-        args[i++] = row.lat();
-        args[i++] = row.lon();
         args[i++] = row.fieldsJson();
         args[i++] = row.payloadJson();
         return i;
