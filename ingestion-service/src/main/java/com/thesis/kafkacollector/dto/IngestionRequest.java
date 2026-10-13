@@ -19,6 +19,11 @@ public class IngestionRequest {
     // μοιράζονται σε όλα τα partitions (μέγιστο throughput, χωρίς εγγύηση σειράς).
     private String keyField;
 
+    // Διαδρομή στο payload για τον χρόνο του γεγονότος, π.χ. "$.ts" (epoch millis ή ISO-8601).
+    // Χωρίς αυτό, χρόνος είναι η στιγμή της αποστολής — δηλαδή ιστορικά δεδομένα θα
+    // εμφανίζονταν όλα "τώρα" και δεν θα υπήρχε χρονοσειρά.
+    private String timeField;
+
     // Μέσα στο payload: το ίδιο το JSON που θα σταλεί (αντικείμενο ή πίνακας αντικειμένων).
     // Όταν υπάρχει, δεν χρειάζονται fileType / filePath.
     private Object payload;
@@ -48,6 +53,9 @@ public class IngestionRequest {
 
     public String getKeyField() { return keyField; }
     public void setKeyField(String keyField) { this.keyField = keyField; }
+
+    public String getTimeField() { return timeField; }
+    public void setTimeField(String timeField) { this.timeField = timeField; }
 
     public Object getPayload() { return payload; }
     public void setPayload(Object payload) { this.payload = payload; }

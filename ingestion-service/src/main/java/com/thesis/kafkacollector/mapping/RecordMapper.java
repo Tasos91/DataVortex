@@ -68,6 +68,36 @@ public final class RecordMapper {
         return node.isValueNode() ? node.asText() : node.toString();
     }
 
+    /**
+     * Ο χρόνος του γεγονότος από το payload: epoch millis (αριθμός) ή ISO-8601 (κείμενο).
+     *
+     * @return epoch millis, ή {@code null} αν δεν ορίστηκε/δεν διαβάστηκε — τότε χρόνος
+     *         είναι η στιγμή της αποστολής
+     */
+    public static Long eventTimeOf(JsonNode root, String timeField) {
+        if (timeField == null || timeField.isBlank()) return null;
+        JsonNode node = JsonPathResolver.resolve(root, timeField);
+        if (node == null || node.isNull()) return null;
+        try {
+            if (node.isNumber()) {
+                long v = node.asLong();
+                // Δέχεται και δευτερόλεπτα: κάτω από ~1e11 δεν μπορεί να είναι millis εποχής
+                return v < 100_000_000_000L ? v * 1000L : v;
+            }
+            String text = node.asText().trim();
+            if (text.isEmpty()) return null;
+            if (text.chars().allMatch(Character::isDigit)) {
+                long v = Long.parseLong(text);
+                return v < 100_000_000_000L ? v * 1000L : v;
+            }
+            return java.time.Instant.parse(text.endsWith("Z") || text.contains("+") ? text : text + "Z")
+                    .toEpochMilli();
+        } catch (RuntimeException e) {
+            log.debug("Το timeField '{}' δεν διαβάστηκε ως χρόνος: {}", timeField, e.getMessage());
+            return null;
+        }
+    }
+
     static Value toValue(JsonNode node) {
         Value.Builder v = Value.newBuilder();
         if (node.isNull() || node.isMissingNode()) {

@@ -270,8 +270,13 @@ public class FileStreamingService {
         IngestedRecordProto.IngestedRecord record = RecordMapper.map(
                 request.getSourceId(), objectMapper.writeValueAsString(node), node, mappings);
         String key = RecordMapper.keyOf(node, request.getKeyField());
+        Long eventTime = RecordMapper.eventTimeOf(node, request.getTimeField());
 
-        kafkaTemplate.send(topic, key, record).whenComplete((result, ex) -> {
+        // Ο χρόνος του μηνύματος στο Kafka γίνεται event_time στη βάση. Με timeField μπορούμε
+        // να φορτώσουμε ιστορικά δεδομένα με τον σωστό τους χρόνο (backfill).
+        var producerRecord = new org.apache.kafka.clients.producer.ProducerRecord<>(
+                topic, null, eventTime, key, record);
+        kafkaTemplate.send(producerRecord).whenComplete((result, ex) -> {
             if (ex != null) {
                 failed.incrementAndGet();
                 log.error("Αποτυχία αποστολής στο Kafka (topic {}, sourceId {}): {}",

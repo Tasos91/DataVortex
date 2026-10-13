@@ -26,6 +26,15 @@
 			<artifactId>micrometer-registry-prometheus</artifactId>
 			<scope>runtime</scope>
 		</dependency>
+		<!-- Cache: τα συγκεντρωτικά queries επαναλαμβάνονται συνεχώς από το UI -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-cache</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>com.github.ben-manes.caffeine</groupId>
+			<artifactId>caffeine</artifactId>
+		</dependency>
 		<!-- Μόνο αυτό το service διαβάζει από τη βάση -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
