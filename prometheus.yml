@@ -6,8 +6,14 @@ scrape_configs:
     static_configs:
       - targets: [ 'localhost:9090' ]
 
-  - job_name: 'spring-boot-app'
+  # Τα τρία services της εφαρμογής. Το host.docker.internal δείχνει στο localhost του
+  # υπολογιστή σου (εκεί που τρέχουν τα Java services). Όσα δεν τρέχουν φαίνονται απλώς DOWN.
+  - job_name: 'datavortex'
     metrics_path: '/actuator/prometheus'
     static_configs:
-      # Το host.docker.internal δείχνει στο localhost του υπολογιστή σου (εκεί που τρέχει η Java)
       - targets: ['host.docker.internal:8080']
+        labels: { service: 'ingestion' }
+      - targets: ['host.docker.internal:8082']
+        labels: { service: 'api' }
+      - targets: ['host.docker.internal:8085']
+        labels: { service: 'analytics-ui' }
