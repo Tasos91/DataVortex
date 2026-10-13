@@ -122,15 +122,10 @@
 			<artifactId>spring-integration-test</artifactId>
 			<scope>test</scope>
 		</dependency>
-		<dependency>
-			<groupId>org.apache.avro</groupId>
-			<artifactId>avro</artifactId>
-			<version>1.11.3</version>
-		</dependency>
-		<!-- Confluent Avro Serializer -->
+		<!-- Confluent Protobuf serializer: στέλνει/διαβάζει Protobuf μέσω του Schema Registry -->
 		<dependency>
 			<groupId>io.confluent</groupId>
-			<artifactId>kafka-avro-serializer</artifactId>
+			<artifactId>kafka-protobuf-serializer</artifactId>
 			<version>7.6.0</version>
 		</dependency>
 	</dependencies>

@@ -22,15 +22,15 @@ import java.util.Map;
 @Slf4j
 public class FileStreamingService {
 
-    // ΑΛΛΑΓΗ: Το KafkaTemplate πλέον στέλνει byte[] (binary) αντί για String
-    private final KafkaTemplate<String, byte[]> kafkaTemplate;
+    // Το KafkaProtobufSerializer γράφει το schema στο Schema Registry και στέλνει το record με το schema id
+    private final KafkaTemplate<String, IngestedRecordProto.IngestedRecord> kafkaTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     // Όρισε το όνομα του topic (μπορείς να το βάλεις και στο application.properties)
-    @Value("${kafka.topic.ingestion:ais-data}")
+    @Value("${spring.kafka.topic.ingestion:ais-data}")
     private String topic;
 
-    public FileStreamingService(KafkaTemplate<String, byte[]> kafkaTemplate) {
+    public FileStreamingService(KafkaTemplate<String, IngestedRecordProto.IngestedRecord> kafkaTemplate) {
         this.kafkaTemplate = kafkaTemplate;
     }
 
@@ -56,15 +56,11 @@ public class FileStreamingService {
 
                     String payloadJson = objectMapper.writeValueAsString(rawJsonMap);
 
-                    // Τα mappings εφαρμόζονται δυναμικά (lat/lon + οποιοδήποτε άλλο πεδίο)
                     IngestedRecordProto.IngestedRecord record = RecordMapper.map(
                             request.getSourceId(), payloadJson, objectMapper.valueToTree(rawJsonMap), mappings);
 
-                    // ΑΛΛΑΓΗ: Μετατροπή ολόκληρου του record σε byte[] (binary) για να σταλεί στο Kafka
-                    byte[] messageToSend = record.toByteArray();
-
                     // Αποστολή στο Kafka Topic (βάζουμε το SourceId ως κλειδί του μηνύματος)
-                    kafkaTemplate.send(topic, request.getSourceId(), messageToSend).whenComplete((result, ex) -> {
+                    kafkaTemplate.send(topic, request.getSourceId(), record).whenComplete((result, ex) -> {
                         if (ex != null) {
                             log.error("Αποτυχία αποστολής στο Kafka για το sourceId: {}", request.getSourceId(), ex);
                         }
@@ -105,7 +101,7 @@ public class FileStreamingService {
     private void sendRecord(IngestionRequest request, JsonNode node, Map<String, String> mappings) throws Exception {
         IngestedRecordProto.IngestedRecord record = RecordMapper.map(
                 request.getSourceId(), objectMapper.writeValueAsString(node), node, mappings);
-        kafkaTemplate.send(topic, request.getSourceId(), record.toByteArray()).whenComplete((result, ex) -> {
+        kafkaTemplate.send(topic, request.getSourceId(), record).whenComplete((result, ex) -> {
             if (ex != null) {
                 log.error("Αποτυχία αποστολής στο Kafka για το sourceId: {}", request.getSourceId(), ex);
             }
@@ -141,10 +137,7 @@ public class FileStreamingService {
                         IngestedRecordProto.IngestedRecord record = RecordMapper.map(
                                 request.getSourceId(), payloadJson, objectMapper.valueToTree(rawJsonMap), mappings);
 
-                        // ΑΛΛΑΓΗ: Μετατροπή σε byte[]
-                        byte[] messageToSend = record.toByteArray();
-
-                        kafkaTemplate.send(topic, request.getSourceId(), messageToSend).whenComplete((result, ex) -> {
+                        kafkaTemplate.send(topic, request.getSourceId(), record).whenComplete((result, ex) -> {
                             if (ex != null) {
                                 log.error("Αποτυχία αποστολής στο Kafka για το sourceId: {}", request.getSourceId(), ex);
                             }

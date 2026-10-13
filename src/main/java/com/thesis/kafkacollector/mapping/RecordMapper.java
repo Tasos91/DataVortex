@@ -40,7 +40,8 @@ public final class RecordMapper {
 
                 JsonNode node = JsonPathResolver.resolve(root, mapping.getValue());
                 if (node == null) {
-                    log.warn("Το mapping '{}' -> '{}' δεν βρήκε τιμή στο payload, το πεδίο παραλείπεται.",
+                    // debug και όχι warn: σε μεγάλο όγκο θα έβγαινε μία γραμμή ανά record
+                    log.debug("Το mapping '{}' -> '{}' δεν βρήκε τιμή στο payload, το πεδίο παραλείπεται.",
                             name, mapping.getValue());
                     continue;
                 }

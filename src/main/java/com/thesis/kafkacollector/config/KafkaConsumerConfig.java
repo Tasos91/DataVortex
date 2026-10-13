@@ -25,11 +25,10 @@ public class KafkaConsumerConfig {
     }
 
     @Bean
-    public Consumer<byte[]> consumeData() {
-        return payload -> {
+    public Consumer<IngestedRecordProto.IngestedRecord> consumeData() {
+        return record -> {
             try {
-                // Η ΜΑΓΕΙΑ: Μετατρέπουμε τα "γυμνά" bytes ξανά σε Protobuf Object
-                IngestedRecordProto.IngestedRecord record = IngestedRecordProto.IngestedRecord.parseFrom(payload);
+                // Ο KafkaProtobufDeserializer (Schema Registry) δίνει ήδη έτοιμο Protobuf object
 
                 log.info("✅ Το Spring Cloud Stream διάβασε Protobuf. SourceID: {}, Lat: {}, Δυναμικά πεδία: {}",
                         record.getSourceId(), record.getLat(), record.getFieldsMap());

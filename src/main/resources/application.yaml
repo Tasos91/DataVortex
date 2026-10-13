@@ -31,7 +31,9 @@
             consumer-properties:
               key.deserializer: org.apache.kafka.common.serialization.StringDeserializer
               # ΔΙΟΡΘΩΣΗ: Πρέπει να διαβάζει Bytes (Protobuf), ΟΧΙ String!
-              value.deserializer: org.apache.kafka.common.serialization.ByteArrayDeserializer
+              value.deserializer: io.confluent.kafka.serializers.protobuf.KafkaProtobufDeserializer
+              schema.registry.url: ${SCHEMA_REGISTRY_URL:http://localhost:8081}
+              specific.protobuf.value.type: com.thesis.kafkacollector.proto.IngestedRecordProto$IngestedRecord
               fetch.min.bytes: ${KAFKA_FETCH_MIN_BYTES:1}
 
         # ----------------------------------------------------
@@ -55,13 +57,14 @@
       producer:
         key-serializer: org.apache.kafka.common.serialization.StringSerializer
         # ΔΙΟΡΘΩΣΗ: Στέλνουμε Bytes, ΟΧΙ String! (Αυτό έφταιγε για το SerializationException)
-        value-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+        value-serializer: io.confluent.kafka.serializers.protobuf.KafkaProtobufSerializer
 
         # --- ΠΡΟΣΘΗΚΕΣ & ΑΛΛΑΓΕΣ ΓΙΑ BIG DATA STREAMING ---
         compression-type: lz4                                # Σώζει bandwidth, ιδανικό για JSON/CSV
         batch-size: ${KAFKA_BATCH_SIZE:65536}                # Αλλάξαμε το default από 16384 (16KB) σε 65536 (64KB)
         buffer-memory: ${KAFKA_BUFFER_MEMORY:67108864}       # 64MB (προστατεύει από OutOfMemory αν το Kafka καθυστερεί)
         properties:
+          schema.registry.url: ${SCHEMA_REGISTRY_URL:http://localhost:8081}
           linger.ms: ${KAFKA_LINGER_MS:5}                    # Αλλάξαμε το 0 σε 5ms για να προλαβαίνει να γεμίσει το batch
 
       consumer:
@@ -69,7 +72,7 @@
         auto-offset-reset: earliest
         key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
         # ΔΙΟΡΘΩΣΗ: Deserializer (Διαβάζει), όχι Serializer!
-        value-deserializer: org.apache.kafka.common.serialization.ByteArrayDeserializer
+        value-deserializer: io.confluent.kafka.serializers.protobuf.KafkaProtobufDeserializer
 
       # Το custom property που διαβάζει ο FileStreamingService & ο Consumer
       topic:

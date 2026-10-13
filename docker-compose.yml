@@ -43,7 +43,7 @@ services:
       - thesis-net
 
   # ----------------------------------------------------
-  # 3. Schema Registry (Για το Avro)
+  # 3. Schema Registry (για το Protobuf schema των μηνυμάτων)
   # ----------------------------------------------------
   schema-registry:
     image: confluentinc/cp-schema-registry:7.6.0
