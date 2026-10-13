@@ -30,11 +30,23 @@
 
             consumer-properties:
               key.deserializer: org.apache.kafka.common.serialization.StringDeserializer
-              # ΔΙΟΡΘΩΣΗ: Πρέπει να διαβάζει Bytes (Protobuf), ΟΧΙ String!
-              value.deserializer: io.confluent.kafka.serializers.protobuf.KafkaProtobufDeserializer
+              # Ο ErrorHandlingDeserializer "τυλίγει" τον Protobuf deserializer: ένα χαλασμένο
+              # μήνυμα δεν ρίχνει τον consumer, γίνεται null + header με το σφάλμα και πάει στο DLQ.
+              value.deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+              spring.deserializer.value.delegate.class: io.confluent.kafka.serializers.protobuf.KafkaProtobufDeserializer
               schema.registry.url: ${SCHEMA_REGISTRY_URL:http://localhost:8081}
               specific.protobuf.value.type: com.thesis.kafkacollector.proto.IngestedRecordProto$IngestedRecord
-              fetch.min.bytes: ${KAFKA_FETCH_MIN_BYTES:1}
+              # Μεγαλύτερα batches: ο broker περιμένει να μαζέψει 64KB ή 500ms. Με fetch.min.bytes=1
+              # τα batches έβγαιναν ~45 μηνύματα, που σημαίνει πολλά μικρά inserts στη βάση.
+              fetch.min.bytes: ${KAFKA_FETCH_MIN_BYTES:65536}
+              fetch.max.wait.ms: ${KAFKA_FETCH_MAX_WAIT_MS:500}
+              max.poll.records: ${KAFKA_MAX_POLL_RECORDS:500}   # μέγεθος batch ανά poll
+              metadata.max.age.ms: ${KAFKA_METADATA_MAX_AGE_MS:30000} # πόσο γρήγορα βρίσκει νέα topics
+
+          bindings:
+            consumeData-in-0:
+              consumer:
+                destination-is-pattern: true  # το destination παραπάνω είναι regex
 
         # ----------------------------------------------------
         # 3. Bindings: Εδώ ικανοποιείς την απαίτηση του Καθηγητή
@@ -42,12 +54,15 @@
         bindings:
           # Consumer (Ανάγνωση από Kafka -> DB)
           consumeData-in-0:
-            destination: ${KAFKA_TOPIC:ais-data} # Κοινό Topic!
+            # Pattern, όχι ένα topic: ο χρήστης ορίζει topic ανά request και ο consumer
+            # τα πιάνει όλα όσα ταιριάζουν (δες destination-is-pattern πιο κάτω).
+            destination: '${KAFKA_TOPIC_PATTERN:ingest\..*}'
             group: ${CONSUMER_GROUP:default-ingestion-group}
             consumer:
               startOffset: earliest # <-- Αυτό ξυπνάει το earliest στο Cloud Stream
               useNativeDecoding: true
-              concurrency: ${CONSUMER_CONCURRENCY:1}
+              batch-mode: true      # List<...> ανά poll, ώστε να γίνονται batch inserts
+              concurrency: ${CONSUMER_CONCURRENCY:3} # να είναι <= τα partitions του topic
 
     # ----------------------------------------------------
     # 4. Standard Kafka Properties (Για Producer & @KafkaListener Consumer)
@@ -76,10 +91,12 @@
 
       # Το custom property που διαβάζει ο FileStreamingService & ο Consumer
       topic:
-        ingestion: ${KAFKA_TOPIC:ais-data}            # default topic όταν το request δεν ορίζει δικό του
+        ingestion: ${KAFKA_TOPIC:ingest.default}      # default topic όταν το request δεν ορίζει δικό του
         default-partitions: ${KAFKA_TOPIC_PARTITIONS:6} # partitions για topic που φτιάχνει η εφαρμογή
         replication-factor: ${KAFKA_TOPIC_REPLICATION:1}
         cache-ttl-ms: ${KAFKA_TOPIC_CACHE_TTL_MS:30000}  # πόσο κρατάει η cache "το topic υπάρχει"
+        consumer-pattern: '${KAFKA_TOPIC_PATTERN:ingest\..*}' # ίδιο με το destination του consumer
+        dlq: ${KAFKA_DLQ_TOPIC:dlq.ingest}               # εκτός pattern, για να μην ξαναδιαβάζεται
 
   # ----------------------------------------------------
   # 5. Monitoring (Prometheus Metrics & Actuator)

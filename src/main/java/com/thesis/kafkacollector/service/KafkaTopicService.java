@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 
 /**
  * Ελέγχει ότι το topic που ζήτησε ο χρήστης υπάρχει, πριν στείλουμε έστω και ένα μήνυμα.
@@ -39,6 +40,13 @@ public class KafkaTopicService {
     @Value("${spring.kafka.topic.replication-factor:1}")
     private int replicationFactor;
 
+    /** Το pattern στο οποίο είναι γραμμένος ο consumer αυτής της εφαρμογής. */
+    @Value("${spring.kafka.topic.consumer-pattern:}")
+    private String consumerPattern;
+
+    @Value("${spring.kafka.topic.dlq:dlq.ingest}")
+    private String dlqTopic;
+
     public KafkaTopicService(KafkaAdmin kafkaAdmin) {
         this.kafkaAdmin = kafkaAdmin;
     }
@@ -52,6 +60,7 @@ public class KafkaTopicService {
      * @throws IllegalArgumentException αν δεν υπάρχει και δεν ζητήθηκε δημιουργία
      */
     public void ensureUsable(String topic, boolean createIfMissing, Integer partitions) {
+        warnIfConsumerIgnores(topic);
         Long cachedAt = knownTopics.get(topic);
         if (cachedAt != null && System.currentTimeMillis() - cachedAt < cacheTtlMs) {
             return;
@@ -74,6 +83,27 @@ public class KafkaTopicService {
                 .build());
         knownTopics.put(topic, System.currentTimeMillis());
         log.info("Δημιουργήθηκε το topic '{}' με {} partitions.", topic, wanted);
+    }
+
+    /**
+     * Ο consumer γράφεται σε pattern (π.χ. {@code ingest\..*}), ώστε να πιάνει όσα topics
+     * φτιάχνει ο χρήστης. Αν το topic του request δεν ταιριάζει, τα δεδομένα θα φτάσουν στο
+     * Kafka αλλά δεν θα τα διαβάσει κανείς — αξίζει προειδοποίηση, όχι σφάλμα (μπορεί να το
+     * καταναλώνει άλλη εφαρμογή).
+     */
+    private void warnIfConsumerIgnores(String topic) {
+        if (consumerPattern == null || consumerPattern.isBlank() || topic.equals(dlqTopic)) {
+            return;
+        }
+        try {
+            if (!Pattern.matches(consumerPattern, topic)) {
+                log.warn("Το topic '{}' δεν ταιριάζει με το pattern του consumer ('{}'): "
+                        + "τα μηνύματα θα σταλούν, αλλά ο consumer αυτής της εφαρμογής δεν θα τα διαβάσει.",
+                        topic, consumerPattern);
+            }
+        } catch (RuntimeException e) {
+            log.warn("Άκυρο pattern consumer '{}': {}", consumerPattern, e.getMessage());
+        }
     }
 
     private boolean exists(String topic) {

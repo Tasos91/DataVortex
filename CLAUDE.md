@@ -19,7 +19,10 @@ Protobuf και τα στέλνει στο Kafka· ένας consumer τα δια
 - `service/FileStreamingService`: CSV, JSON αρχείο και inline `payload` → Protobuf → Kafka.
 - `service/KafkaTopicService`: ελέγχει/δημιουργεί το topic του request (fail-fast, με cache).
 - `mapping/JsonPathResolver` και `mapping/RecordMapper`: εφαρμόζουν τα `fieldMappings` στο payload.
-- `config/KafkaConsumerConfig`: bean `Consumer<byte[]> consumeData` (Spring Cloud Stream) → `DashboardMetricsService`.
+- `config/KafkaConsumerConfig`: bean `Consumer<Message<List<IngestedRecord>>> consumeData` — **batch** consumer
+  (Spring Cloud Stream). Τα Kafka metadata (topic/partition/offset) έρχονται ως Lists στα headers.
+- `config/KafkaErrorHandlingConfig`: retries και DLQ. Το DLQ `KafkaTemplate` ΔΕΝ είναι bean επίτηδες — ένα δεύτερο
+  `KafkaTemplate`/`ProducerFactory` στο context κάνει το KafkaAutoConfiguration να μην φτιάξει το κανονικό.
 - `service/KafkaConsumerService`: ολόκληρο σε σχόλια, νεκρός κώδικας· μην τον ξαναενεργοποιείς χωρίς λόγο.
 - `entity/IngestedRecord` + `repository/`: JPA για Postgres (πίνακας `ingested_records`). Προς το παρόν ο consumer ΔΕΝ γράφει εκεί.
 - `dto/IngestionRequest`: `sourceId`, `fileType`, `filePath`, `topic`, `createTopicIfMissing`, `partitions`,
@@ -41,6 +44,16 @@ Protobuf και τα στέλνει στο Kafka· ένας consumer τα δια
 - **Partition key:** `"keyField": "$.vessel.mmsi"`. Ίδιο κλειδί → ίδιο partition → εγγυημένη σειρά για την οντότητα.
   Χωρίς `keyField` το κλειδί είναι `null` και τα μηνύματα μοιράζονται (μέγιστο throughput, καμία εγγύηση σειράς).
   ΜΗΝ βάλεις ξανά το `sourceId` ως κλειδί: στέλνει τα πάντα σε ένα partition και μηδενίζει τον παραλληλισμό.
+- **Ο consumer ακούει σε pattern**, όχι σε ένα topic: `destination: 'ingest\..*'` με `destination-is-pattern: true`.
+  Άρα τα topics του χρήστη πρέπει να λέγονται `ingest.<κάτι>` για να διαβαστούν (αλλιώς μόνο warning στο log).
+  Το DLQ (`dlq.ingest`) είναι επίτηδες έξω από το pattern, αλλιώς θα το ξαναδιάβαζε σε βρόχο.
+- **Batch mode:** `batch-mode: true`, `max.poll.records: 500`, `fetch.min.bytes: 65536`, `fetch.max.wait.ms: 500`.
+  Με `fetch.min.bytes: 1` τα batches έβγαιναν ~45 μηνύματα· τώρα φτάνουν το όριο των 500.
+  `concurrency` (default 3) <= partitions, αλλιώς τα παραπανίσια threads μένουν άεργα.
+- **Poison pill:** `ErrorHandlingDeserializer` + `DefaultErrorHandler` + `DeadLetterPublishingRecoverer`. Χαλασμένο
+  μήνυμα → `dlq.ingest` αυτούσιο (με headers το αρχικό topic/partition/offset) και ο consumer συνεχίζει.
+  Σε batch listener, σκέτο exception στέλνει ΟΛΟ το batch στο DLQ· πέτα `BatchListenerFailedException(msg, index)`
+  για να πάει μόνο το ένα record.
 - Στο Spring Boot 4 το MVC χρησιμοποιεί Jackson 3, ενώ ο κώδικας χρησιμοποιεί `com.fasterxml` (Jackson 2). Γι' αυτό το
   `payload` στο DTO είναι `Object` και όχι `JsonNode`· μην το αλλάξεις.
 
