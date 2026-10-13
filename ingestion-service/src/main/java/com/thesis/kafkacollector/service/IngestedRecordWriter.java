@@ -34,12 +34,46 @@ public class IngestedRecordWriter {
 
     /** event_time, topic, kafka_partition, kafka_offset, source_id, fields, payload */
     private static final int COLUMNS = 7;
+    /**
+     * Ένα statement γράφει σε ΤΡΕΙΣ πίνακες, με data-modifying CTEs:
+     * <ol>
+     *   <li>{@code ingested_records} — η πηγή αλήθειας, idempotent με ON CONFLICT DO NOTHING·</li>
+     *   <li>{@code metric_points} — μία γραμμή ανά αριθμητικό πεδίο, από το {@code RETURNING} του
+     *       πρώτου, άρα μόνο για όσα μπήκαν πραγματικά (τα διπλά δεν παράγουν μετρικές)·</li>
+     *   <li>{@code field_catalog} — ποια πεδία υπάρχουν ανά πηγή, για να μη σαρώνει το UI τη βάση.</li>
+     * </ol>
+     * Το τελικό {@code SELECT count(*) FROM ins} δίνει πόσες γραμμές μπήκαν· τα data-modifying
+     * CTEs εκτελούνται πάντα, ανεξάρτητα από το αν το κύριο query διαβάζει το αποτέλεσμά τους.
+     * Ένα round-trip για τα τρία.
+     */
     private static final String INSERT_PREFIX = """
-            INSERT INTO ingested_records
-                (event_time, topic, kafka_partition, kafka_offset, source_id, fields, payload)
-            VALUES """;
+            WITH ins AS (
+                INSERT INTO ingested_records
+                    (event_time, topic, kafka_partition, kafka_offset, source_id, fields, payload)
+                VALUES """;
     private static final String VALUES_TUPLE = "(?,?,?,?,?,?::jsonb,?::jsonb)";
-    private static final String ON_CONFLICT = " ON CONFLICT DO NOTHING";
+    private static final String INSERT_SUFFIX = """
+            \n    ON CONFLICT DO NOTHING
+                RETURNING event_time, source_id, topic, fields
+            ), mp AS (
+                INSERT INTO metric_points (event_time, source_id, topic, field, value)
+                SELECT i.event_time, i.source_id, i.topic, f.key, (f.value #>> '{}')::double precision
+                FROM ins i, jsonb_each(i.fields) f
+                WHERE jsonb_typeof(f.value) = 'number'
+                RETURNING 1
+            ), cat AS (
+                INSERT INTO field_catalog (source_id, topic, field, json_type, n, first_seen, last_seen)
+                SELECT i.source_id, i.topic, f.key, jsonb_typeof(f.value),
+                       count(*), min(i.event_time), max(i.event_time)
+                FROM ins i, jsonb_each(i.fields) f
+                GROUP BY 1, 2, 3, 4
+                ON CONFLICT (source_id, topic, field, json_type) DO UPDATE
+                    SET n = field_catalog.n + EXCLUDED.n,
+                        first_seen = least(field_catalog.first_seen, EXCLUDED.first_seen),
+                        last_seen = greatest(field_catalog.last_seen, EXCLUDED.last_seen)
+                RETURNING 1
+            )
+            SELECT count(*) FROM ins""";
 
     private static final JsonFormat.Printer JSON = JsonFormat.printer()
             .omittingInsignificantWhitespace()
@@ -118,7 +152,8 @@ public class IngestedRecordWriter {
             i = fill(args, i, row);
         }
         try {
-            return jdbc.update(sql, args);
+            Integer inserted = jdbc.queryForObject(sql, Integer.class, args);
+            return inserted != null ? inserted : 0;
         } catch (DataAccessException e) {
             // Μπορεί να φταίει μία μόνο γραμμή (π.χ. άκυρο JSON). Ξαναδοκιμάζουμε μία-μία
             // ώστε να περάσουν οι υπόλοιπες, αντί να χαθεί όλο το batch.
@@ -139,7 +174,8 @@ public class IngestedRecordWriter {
             Object[] args = new Object[COLUMNS];
             fill(args, 0, row);
             try {
-                written += jdbc.update(sql, args);
+                Integer inserted = jdbc.queryForObject(sql, Integer.class, args);
+                written += inserted != null ? inserted : 0;
             } catch (DataAccessException e) {
                 if (e instanceof org.springframework.dao.DataAccessResourceFailureException
                         || e instanceof org.springframework.dao.TransientDataAccessException) {
@@ -170,7 +206,8 @@ public class IngestedRecordWriter {
     }
 
     private static String buildSql(int rows) {
-        StringBuilder sb = new StringBuilder(INSERT_PREFIX.length() + rows * (VALUES_TUPLE.length() + 1) + 32);
+        StringBuilder sb = new StringBuilder(
+                INSERT_PREFIX.length() + INSERT_SUFFIX.length() + rows * (VALUES_TUPLE.length() + 1));
         sb.append(INSERT_PREFIX);
         for (int i = 0; i < rows; i++) {
             if (i > 0) {
@@ -178,7 +215,7 @@ public class IngestedRecordWriter {
             }
             sb.append(VALUES_TUPLE);
         }
-        return sb.append(ON_CONFLICT).toString();
+        return sb.append(INSERT_SUFFIX).toString();
     }
 
     /** Τα δυναμικά πεδία του proto ως JSON, για τη στήλη jsonb. */

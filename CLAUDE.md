@@ -11,8 +11,7 @@ TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
 - [x] **Β2 καθαρισμός lat/lon** — έφυγαν από proto (reserved 3,4), βάση (V2), mapper, writer, tests.
 - [x] **Β3 τρία services (multi-module Maven)** — `common`, `ingestion-service`, `api-service` (σκελετός),
       `analytics-ui-service` (σκελετός). Τα δύο τελευταία γεμίζουν στα Β4/Β5.
-- [ ] **Β4 api-service** — read-only REST πάνω από τη βάση, keyset pagination, cache, continuous aggregates.
-      ΜΟΝΟ αυτό αγγίζει τη βάση στο read path.
+- [x] **Β4 api-service** — read-only REST, continuous aggregates, keyset pagination, cache, ETag.
 - [ ] **Β5 analytics-ui-service** — UI που καλεί το api-service· clustering + classification + ανίχνευση
       ανωμαλιών, με ΔΙΑΦΟΡΕΤΙΚΗ μεταχείριση ανά τύπο δεδομένων (profiles: ai-telemetry, weather, generic).
 - [ ] **Β6 integration tests** — Testcontainers για API↔DB, service-to-service.
@@ -149,6 +148,42 @@ TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
 - NDJSON 200.000 εγγραφές (25MB): 11,5s το publish, 31s μέχρι να είναι όλα στη βάση, και η μνήμη της JVM
   ανέβηκε μόνο 85MB (548 -> 634MB).
 - 8 ταυτόχρονα requests με όριο 4: 4 x 200 και 4 x 429.
+
+## Γιατί το API μένει γρήγορο όσο κι αν μεγαλώσουν τα δεδομένα
+Αυτό είναι η καρδιά του σχεδιασμού, μη το χαλάσεις:
+- **Continuous aggregates (TimescaleDB).** Το `metric_points` (long format: μία γραμμή ανά αριθμητικό
+  πεδίο ανά μήνυμα) συγκεντρώνεται σε `metric_1m` → `metric_1h` → `metric_1d` (ιεραρχικά: το ωριαίο
+  χτίζεται από το λεπτιαίο, όχι από τα ωμά). Μετρημένο: ίδιο ερώτημα 12 ωρών = **3,2ms** από το
+  συγκεντρωτικό έναντι **36ms** από τα ωμά, και η διαφορά μεγαλώνει γραμμικά με τον όγκο.
+- **Κρατάμε sum και sum_sq, όχι avg/stddev.** Έτσι μέσος και τυπική απόκλιση υπολογίζονται σε
+  οποιοδήποτε επίπεδο και τα συγκεντρωτικά αθροίζονται σωστά. Μέσος όρος μέσων όρων = λάθος.
+- **`materialized_only = false`**: τα φρέσκα δεδομένα φαίνονται αμέσως (το Timescale ενώνει το
+  υλικοποιημένο κομμάτι με ζωντανό query στην ουρά). Επαληθευμένο στο EXPLAIN: 718 γραμμές από το
+  υλικοποιημένο hypertable, 0 από τα ωμά.
+- **Επιλογή ανάλυσης (`Buckets`)**: `bucket=auto` διαλέγει 1m/1h/1d ώστε η απάντηση να έχει πάντα
+  ≤600 κουβάδες. Άρα το κόστος εξαρτάται από το ΠΛΗΘΟΣ ΚΟΥΒΑΔΩΝ, όχι από τον όγκο.
+- **Keyset pagination (`Cursor`), ποτέ OFFSET.** Μετρημένο: σελίδα 1 = 21,6ms, σελίδα 300 = 4,2ms
+  (σταθερό), ενώ `OFFSET 29900` στη βάση = 35,5ms έναντι 2ms για `OFFSET 0`.
+- **Cache (Caffeine, TTL 10s) + ETag.** Μετρημένο: `/series` 15,8ms → 4,1ms. Τα hit/miss βγαίνουν
+  ως μετρικές, δεν είναι εικασία.
+- **Το `/matrix` είναι ο δίαυλος του ML**: κουβάδες × πεδία. Το clustering τρέχει πάνω σε εκατοντάδες
+  κουβάδες, όχι σε εκατομμύρια γραμμές — γι' αυτό δεν αργεί ποτέ.
+- Ο writer γράφει σε **τρεις πίνακες με ένα statement** (data-modifying CTEs): `ingested_records`
+  (πηγή αλήθειας) → `metric_points` (μόνο για όσες γραμμές μπήκαν όντως, μέσω `RETURNING`) →
+  `field_catalog` (τι πεδία υπάρχουν, για να μη σαρώνει το UI). Ένα round-trip για τα τρία.
+- **`timeField`** στο request: ο χρόνος του γεγονότος έρχεται από το payload (epoch ή ISO-8601) και
+  γίνεται timestamp του μηνύματος Kafka, άρα και `event_time` στη βάση. Χωρίς αυτό τα ιστορικά
+  δεδομένα θα έπεφταν όλα στο "τώρα".
+
+## Endpoints του api-service (`:8082`)
+| Endpoint | Τι δίνει |
+|---|---|
+| `GET /api/v1/sources` | πηγές, topics, πλήθη, πρώτη/τελευταία εγγραφή |
+| `GET /api/v1/sources/{source}/fields` | τα πεδία και ο τύπος τους (number/string/...) |
+| `GET /api/v1/series?source=&field=&from=&to=&bucket=` | χρονοσειρά: n, avg, min, max, stddev |
+| `GET /api/v1/matrix?source=&fields=&from=&to=&bucket=` | πίνακας κουβάδες × πεδία (για ML) |
+| `GET /api/v1/rates?source=&from=&to=&bucket=` | εγγραφές ανά κουβά |
+| `GET /api/v1/records?source=&topic=&cursor=&limit=` | ωμές εγγραφές, keyset, max 1000 |
 
 ## Μετρικές (Prometheus/Grafana)
 - `/actuator/prometheus` σε κάθε service. Το Prometheus (`prometheus.yml`) σκρέιπαρει και τα τρία
