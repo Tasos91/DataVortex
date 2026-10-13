@@ -25,7 +25,7 @@ class RecordMapperTest {
         m.put("BtcMin", "$.btcusdt.min");
         m.put("SecondItem", "$.items[1].p");
         m.put("Name", "name");           // σκέτο όνομα = κλειδί πρώτου επιπέδου
-        m.put("lat", "$.ethusdt.min");   // σταθερό πεδίο
+        m.put("EthMin", "$.ethusdt.min");
         m.put("Missing", "$.nope.x");    // δεν υπάρχει -> παραλείπεται
 
         IngestedRecord r = IngestedRecord.parseFrom(
@@ -35,7 +35,7 @@ class RecordMapperTest {
         assertEquals(100000.0, r.getFieldsOrThrow("BtcMin").getNumberValue());
         assertEquals(2.0, r.getFieldsOrThrow("SecondItem").getNumberValue());
         assertEquals("x", r.getFieldsOrThrow("Name").getStringValue());
-        assertEquals(5000.0, r.getLat());
+        assertEquals(5000.0, r.getFieldsOrThrow("EthMin").getNumberValue());
         assertFalse(r.containsFields("Missing"));
         assertEquals(PAYLOAD, r.getPayloadJson());
     }

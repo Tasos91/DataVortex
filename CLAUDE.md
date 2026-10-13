@@ -8,8 +8,7 @@ TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
 ## Πλάνο και πρόοδος (ΔΙΑΒΑΣΕ ΠΡΩΤΑ ΑΥΤΟ — συνέχισε από το πρώτο ανολοκλήρωτο)
 Μεγάλη επέκταση σε 7 βήματα, ένα branch ανά βήμα: branch -> commit -> push -> merge στο master -> push.
 - [x] **Β1 μετρικές** — Micrometer/Prometheus σε όλα τα επίπεδα, consumer lag, Grafana dashboard (provisioned).
-- [ ] **Β2 καθαρισμός lat/lon** — φεύγουν από proto, βάση (migration), mapper, writer, tests. Όλα τα πεδία
-      του χρήστη πάνε πλέον μόνο στο `fields` jsonb.
+- [x] **Β2 καθαρισμός lat/lon** — έφυγαν από proto (reserved 3,4), βάση (V2), mapper, writer, tests.
 - [ ] **Β3 τρία services (multi-module Maven)** — `common`, `ingestion-service` (ό,τι υπάρχει σήμερα),
       `api-service`, `analytics-ui-service`.
 - [ ] **Β4 api-service** — read-only REST πάνω από τη βάση, keyset pagination, cache, continuous aggregates.
@@ -60,8 +59,9 @@ TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
 - Παλιά μηνύματα στο topic που στάλθηκαν ως raw bytes (χωρίς schema id) δεν διαβάζονται από τον consumer: χρησιμοποίησε νέο topic ή άδειασέ το.
 - Τα δυναμικά πεδία ζουν στο `map<string, google.protobuf.Value> fields = 5` του
   `src/main/proto/ingested_record.proto`. Προσθήκη πεδίου = νέος αριθμός, ποτέ μην αλλάζεις/ξαναχρησιμοποιείς υπάρχοντες.
-- `fieldMappings`: `{"ΟνομαΠεδίου": "$.διαδρομή.στο.json"}`. Τα ονόματα `lat`/`lon` γεμίζουν τα σταθερά πεδία, όλα τα άλλα
-  πάνε στο `fields`. Σκέτο όνομα (χωρίς `$`) = κλειδί πρώτου επιπέδου (CSV). Δεν βρέθηκε τιμή → παράλειψη + warn, όχι σφάλμα.
+- `fieldMappings`: `{"ΟνομαΠεδίου": "$.διαδρομή.στο.json"}`. **ΟΛΑ** τα πεδία πάνε στο `fields` jsonb· κανένα
+  όνομα δεν έχει ξεχωριστή μεταχείριση (τα `lat`/`lon` ήταν παράδειγμα και αφαιρέθηκαν). Σκέτο όνομα (χωρίς `$`)
+  = κλειδί πρώτου επιπέδου (CSV). Δεν βρέθηκε τιμή → παράλειψη + debug, όχι σφάλμα.
 - **Topic ανά request:** `"topic": "..."` στο request· αν λείπει, το default του `application.yaml`. Αν το topic δεν
   υπάρχει → 400 αμέσως (ο broker έχει `auto.create.topics.enable=false`, αλλιώς θα το έφτιαχνε με 1 partition).
   Με `"createTopicIfMissing": true` το φτιάχνει η εφαρμογή (`partitions`, default 6).
@@ -100,8 +100,11 @@ TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
 - **Το schema το φτιάχνει το Flyway** (`src/main/resources/db/migration/`), όχι το `ddl-auto` (είναι `none`).
   Στο Spring Boot 4 χρειάζεται το `spring-boot-starter-flyway`: μόνο με το `flyway-core` δεν τρέχει τίποτα.
   Νέα αλλαγή schema = νέο αρχείο `V2__...sql`· ΜΗΝ επεξεργάζεσαι migration που έχει τρέξει.
-- Πίνακας `ingested_records`: hypertable με διάσταση χρόνου `event_time` (chunks ανά ημέρα), συμπίεση μετά
-  από 7 ημέρες (`segmentby = topic`), και `PRIMARY KEY (event_time, topic, kafka_partition, kafka_offset)`.
+- Πίνακας `ingested_records`: 7 στήλες — `event_time`, `topic`, `kafka_partition`, `kafka_offset`,
+  `source_id`, `fields` (jsonb, τα πεδία του χρήστη), `payload` (jsonb, το αρχικό JSON). Hypertable με
+  διάσταση χρόνου `event_time` (chunks ανά ημέρα), συμπίεση μετά από 7 ημέρες (`segmentby = topic`),
+  και `PRIMARY KEY (event_time, topic, kafka_partition, kafka_offset)`.
+- **Ο πίνακας δεν αποκτά στήλες ανά mapping.** Νέο πεδίο = νέο κλειδί μέσα στο `fields`, καμία αλλαγή schema.
 - **Idempotency:** ο consumer είναι at-least-once, άρα τα διπλά είναι αναμενόμενα. Το `(topic, partition, offset)`
   του Kafka είναι μοναδικό, οπότε `INSERT ... ON CONFLICT DO NOTHING` αρκεί — δοκιμασμένο ότι δουλεύει και σε
   συμπιεσμένο chunk. Το `event_time` ΠΡΕΠΕΙ να είναι το timestamp του μηνύματος Kafka (σταθερό σε κάθε
@@ -109,8 +112,6 @@ TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
 - **Γράψιμο:** ένα multi-row `INSERT` ανά batch (`datavortex.batch-rows`, default 1000 γραμμές/statement) και
   `reWriteBatchedInserts=true` στο JDBC URL. Αν το batch αποτύχει, ξαναδοκιμάζεται μία-μία γραμμή ώστε να
   περάσουν οι υπόλοιπες· μια γραμμή που απορρίπτεται από τη βάση λογίζεται ως ERROR με topic/partition/offset.
-- `lat`/`lon` είναι `optional` στο proto: αν ο χρήστης δεν τα χαρτογραφήσει, στη βάση μπαίνει NULL και όχι 0.0.
-  Γι' αυτό ο writer χρησιμοποιεί `hasLat()`/`hasLon()`.
 - Το TimescaleDB απαιτεί τη διάσταση χρόνου σε κάθε unique index, και τα `segmentby` columns πρέπει να είναι
   μέσα στο unique index· γι' αυτό το `segmentby` είναι μόνο `topic` και όχι `topic, source_id`.
 - ΔΕΝ υπάρχει retention policy (θα έσβηνε δεδομένα). Οδηγία για το πώς μπαίνει: στο V1 migration.

@@ -92,9 +92,6 @@ public class KafkaConsumerConfig {
                         (int) longAt(partitions, i, 0),
                         longAt(offsets, i, 0),
                         record.getSourceId(),
-                        // optional στο proto: null όταν ο χρήστης δεν χαρτογράφησε συντεταγμένες
-                        record.hasLat() ? record.getLat() : null,
-                        record.hasLon() ? record.getLon() : null,
                         IngestedRecordWriter.fieldsToJson(record),
                         record.getPayloadJson().isEmpty() ? null : record.getPayloadJson()));
                 lastPayload = record.getPayloadJson();
