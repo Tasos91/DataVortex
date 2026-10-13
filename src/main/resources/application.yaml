@@ -91,6 +91,9 @@
         buffer-memory: ${KAFKA_BUFFER_MEMORY:67108864}       # 64MB (προστατεύει από OutOfMemory αν το Kafka καθυστερεί)
         properties:
           schema.registry.url: ${SCHEMA_REGISTRY_URL:http://localhost:8081}
+          # Αν γεμίσει το buffer-memory, το send() μπλοκάρει· 10s αντί για 60s (default),
+          # ώστε το HTTP request να απαντά με σφάλμα και να μη κρεμάει το thread.
+          max.block.ms: ${KAFKA_MAX_BLOCK_MS:10000}
           linger.ms: ${KAFKA_LINGER_MS:5}                    # Αλλάξαμε το 0 σε 5ms για να προλαβαίνει να γεμίσει το batch
 
       consumer:
@@ -118,6 +121,9 @@
     # σε κομμάτια αυτού του μεγέθους· 9 στήλες x 1000 = 9000 παράμετροι, άνετα κάτω από
     # το όριο των 65535 παραμέτρων του Postgres.
     batch-rows: ${DB_BATCH_ROWS:1000}
+    # Πόσα ταυτόχρονα ingest requests επιτρέπονται. Πιο πολλά σημαίνει ότι γεμίζει το buffer
+    # του producer και μπλοκάρουν όλα τα Tomcat threads· τα επιπλέον παίρνουν 429.
+    max-concurrent-ingests: ${MAX_CONCURRENT_INGESTS:4}
 
   management:
     endpoints:
