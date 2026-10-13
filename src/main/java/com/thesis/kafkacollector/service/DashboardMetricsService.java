@@ -11,11 +11,26 @@ public class DashboardMetricsService {
     private volatile String lastMessage = "";
 
     public void recordMessage(String message) {
+        recordMessages(1, message);
+    }
+
+    /**
+     * Μετρά ένα ολόκληρο batch με μία κίνηση, αντί για μία ανά μήνυμα.
+     *
+     * @param count       πόσα μηνύματα
+     * @param lastMessage το payload του τελευταίου (για το dashboard), μπορεί να είναι null
+     */
+    public void recordMessages(int count, String lastMessage) {
+        if (count <= 0) {
+            return;
+        }
         if (totalMessages.get() == 0) {
             startTime = System.currentTimeMillis();
         }
-        totalMessages.incrementAndGet();
-        this.lastMessage = message;
+        totalMessages.addAndGet(count);
+        if (lastMessage != null) {
+            this.lastMessage = lastMessage;
+        }
     }
 
     public long getTotalMessages() {
