@@ -1,8 +1,10 @@
 package com.thesis.kafkacollector.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.thesis.kafkacollector.dto.IngestionRequest;
 import com.thesis.kafkacollector.entity.IngestedRecord;
+import com.thesis.kafkacollector.mapping.RecordMapper;
 import com.thesis.kafkacollector.proto.IngestedRecordProto;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -52,17 +54,11 @@ public class FileStreamingService {
                         rawJsonMap.put(headers[i].trim(), values[i].trim());
                     }
 
-                    Double lat = extractDouble(rawJsonMap, mappings.get("lat"));
-                    Double lon = extractDouble(rawJsonMap, mappings.get("lon"));
                     String payloadJson = objectMapper.writeValueAsString(rawJsonMap);
 
-                    // ΑΛΛΑΓΗ: Δημιουργία του αντικειμένου με τον Builder του Protobuf
-                    IngestedRecordProto.IngestedRecord record = IngestedRecordProto.IngestedRecord.newBuilder()
-                            .setSourceId(request.getSourceId() != null ? request.getSourceId() : "")
-                            .setPayloadJson(payloadJson != null ? payloadJson : "")
-                            .setLat(lat != null ? lat : 0.0)
-                            .setLon(lon != null ? lon : 0.0)
-                            .build();
+                    // Τα mappings εφαρμόζονται δυναμικά (lat/lon + οποιοδήποτε άλλο πεδίο)
+                    IngestedRecordProto.IngestedRecord record = RecordMapper.map(
+                            request.getSourceId(), payloadJson, objectMapper.valueToTree(rawJsonMap), mappings);
 
                     // ΑΛΛΑΓΗ: Μετατροπή ολόκληρου του record σε byte[] (binary) για να σταλεί στο Kafka
                     byte[] messageToSend = record.toByteArray();
@@ -81,13 +77,39 @@ public class FileStreamingService {
         }
     }
 
-    private Double extractDouble(Map<String, Object> map, String key) {
-        if (key == null || !map.containsKey(key)) return null;
-        try {
-            return Double.parseDouble(map.get(key).toString());
-        } catch (NumberFormatException e) {
-            return null;
+    /**
+     * Δέχεται το JSON payload απευθείας μέσα στο request και το στέλνει στο Kafka ως Protobuf,
+     * χαρτογραφώντας τα πεδία που όρισε ο χρήστης στο fieldMappings.
+     * Αν το payload είναι πίνακας, κάθε στοιχείο γίνεται ξεχωριστό μήνυμα.
+     *
+     * @return πόσα μηνύματα στάλθηκαν
+     */
+    public int processPayload(IngestionRequest request) throws Exception {
+        JsonNode root = objectMapper.valueToTree(request.getPayload());
+        Map<String, String> mappings = request.getFieldMappings();
+        int sent = 0;
+
+        if (root.isArray()) {
+            for (JsonNode element : root) {
+                sendRecord(request, element, mappings);
+                sent++;
+            }
+        } else {
+            sendRecord(request, root, mappings);
+            sent++;
         }
+        log.info("Payload: στάλθηκαν {} μηνύματα στο topic {}", sent, topic);
+        return sent;
+    }
+
+    private void sendRecord(IngestionRequest request, JsonNode node, Map<String, String> mappings) throws Exception {
+        IngestedRecordProto.IngestedRecord record = RecordMapper.map(
+                request.getSourceId(), objectMapper.writeValueAsString(node), node, mappings);
+        kafkaTemplate.send(topic, request.getSourceId(), record.toByteArray()).whenComplete((result, ex) -> {
+            if (ex != null) {
+                log.error("Αποτυχία αποστολής στο Kafka για το sourceId: {}", request.getSourceId(), ex);
+            }
+        });
     }
 
     public void processJsonStream(IngestionRequest request) throws Exception {
@@ -114,17 +136,10 @@ public class FileStreamingService {
                     try {
                         Map<String, Object> rawJsonMap = objectMapper.readValue(parser, Map.class);
 
-                        Double lat = extractDouble(rawJsonMap, mappings.get("lat"));
-                        Double lon = extractDouble(rawJsonMap, mappings.get("lon"));
                         String payloadJson = objectMapper.writeValueAsString(rawJsonMap);
 
-                        // ΑΛΛΑΓΗ: Δημιουργία του αντικειμένου με τον Builder του Protobuf
-                        IngestedRecordProto.IngestedRecord record = IngestedRecordProto.IngestedRecord.newBuilder()
-                                .setSourceId(request.getSourceId() != null ? request.getSourceId() : "")
-                                .setPayloadJson(payloadJson != null ? payloadJson : "")
-                                .setLat(lat != null ? lat : 0.0)
-                                .setLon(lon != null ? lon : 0.0)
-                                .build();
+                        IngestedRecordProto.IngestedRecord record = RecordMapper.map(
+                                request.getSourceId(), payloadJson, objectMapper.valueToTree(rawJsonMap), mappings);
 
                         // ΑΛΛΑΓΗ: Μετατροπή σε byte[]
                         byte[] messageToSend = record.toByteArray();

@@ -18,12 +18,15 @@ public class IngestionController {
     @PostMapping("/upload")
     public ResponseEntity<String> startIngestion(@RequestBody IngestionRequest request) {
         try {
-            if ("CSV".equalsIgnoreCase(request.getFileType())) {
+            if (request.getPayload() != null) {
+                int sent = streamingService.processPayload(request);
+                return ResponseEntity.ok("Στάλθηκαν " + sent + " μηνύματα στο Kafka με δυναμικά πεδία Protobuf.");
+            } else if ("CSV".equalsIgnoreCase(request.getFileType())) {
                 streamingService.processCsvStream(request);
             } else if ("JSON".equalsIgnoreCase(request.getFileType())) {
                 streamingService.processJsonStream(request);
             } else {
-                return ResponseEntity.badRequest().body("Μη έγκυρος τύπος αρχείου. Υποστηρίζονται CSV και JSON.");
+                return ResponseEntity.badRequest().body("Δώσε είτε payload είτε fileType (CSV ή JSON) με filePath.");
             }
             return ResponseEntity.ok("Η εισαγωγή στον πίνακα ingested_records ολοκληρώθηκε!");
         } catch (Exception e) {

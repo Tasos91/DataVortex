@@ -31,8 +31,8 @@ public class KafkaConsumerConfig {
                 // Η ΜΑΓΕΙΑ: Μετατρέπουμε τα "γυμνά" bytes ξανά σε Protobuf Object
                 IngestedRecordProto.IngestedRecord record = IngestedRecordProto.IngestedRecord.parseFrom(payload);
 
-                log.info("✅ ΕΠΙΤΕΛΟΥΣ! Το Spring Cloud Stream διάβασε Protobuf. SourceID: {}, Lat: {}",
-                        record.getSourceId(), record.getLat());
+                log.info("✅ Το Spring Cloud Stream διάβασε Protobuf. SourceID: {}, Lat: {}, Δυναμικά πεδία: {}",
+                        record.getSourceId(), record.getLat(), record.getFieldsMap());
 
                 // ΠΡΟΣΟΧΗ: Αν η recordMessage θέλει String, στείλε της π.χ. το JSON string που κρύψαμε μέσα στο record
                 metricsService.recordMessage(record.getPayloadJson());

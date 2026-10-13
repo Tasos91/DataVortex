@@ -1,11 +1,14 @@
 syntax = "proto3";
 
+import "google/protobuf/struct.proto";
+
 option java_package = "com.thesis.kafkacollector.proto";
 option java_outer_classname = "IngestedRecordProto";
 
 message IngestedRecord {
   string sourceId = 1;
-  string payloadJson = 2; // Κρατάμε το raw json string όπως το είχες
+  string payloadJson = 2;
   double lat = 3;
   double lon = 4;
+  map<string, google.protobuf.Value> fields = 5; // Δυναμικά πεδία: το όνομα του πεδίου και η διαδρομή (JSONPath) ορίζονται από τον χρήστη
 }
