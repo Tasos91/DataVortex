@@ -9,8 +9,8 @@ TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
 Μεγάλη επέκταση σε 7 βήματα, ένα branch ανά βήμα: branch -> commit -> push -> merge στο master -> push.
 - [x] **Β1 μετρικές** — Micrometer/Prometheus σε όλα τα επίπεδα, consumer lag, Grafana dashboard (provisioned).
 - [x] **Β2 καθαρισμός lat/lon** — έφυγαν από proto (reserved 3,4), βάση (V2), mapper, writer, tests.
-- [ ] **Β3 τρία services (multi-module Maven)** — `common`, `ingestion-service` (ό,τι υπάρχει σήμερα),
-      `api-service`, `analytics-ui-service`.
+- [x] **Β3 τρία services (multi-module Maven)** — `common`, `ingestion-service`, `api-service` (σκελετός),
+      `analytics-ui-service` (σκελετός). Τα δύο τελευταία γεμίζουν στα Β4/Β5.
 - [ ] **Β4 api-service** — read-only REST πάνω από τη βάση, keyset pagination, cache, continuous aggregates.
       ΜΟΝΟ αυτό αγγίζει τη βάση στο read path.
 - [ ] **Β5 analytics-ui-service** — UI που καλεί το api-service· clustering + classification + ανίχνευση
@@ -20,14 +20,31 @@ TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
 
 ## Εντολές (το μηχάνημα έχει αργή CPU, 4 πυρήνες: τρέχε το ελάχιστο)
 - Η default `java` είναι 11. Πάντα: `export JAVA_HOME=~/.jdks/corretto-21.0.2`
-- Compile: `./mvnw -o -q compile`  (offline, χωρίς `clean`)
-- Ένα test: `./mvnw -o -q test -Dtest=RecordMapperTest`
-- ΜΗΝ τρέχεις `KafkaCollectorApplicationTests` (`@SpringBootTest`): θέλει Postgres + Kafka και είναι αργό.
+- **Multi-module:** δούλεψε πάντα με `-pl <module>`, όχι σε όλο το reactor.
+  - Compile ενός service: `./mvnw -q -o -pl ingestion-service compile`
+  - Ένα test: `./mvnw -q -o -pl ingestion-service test -Dtest=RecordMapperTest`
+  - Τρέξιμο ενός service: `./mvnw -q -o -pl api-service spring-boot:run`
+  - Όλα μαζί: `bash run-all.sh` (logs στο `logs/`), ή `bash run-all.sh api`
+- **Άλλαξες το `.proto`;** Χρειάζεται `./mvnw -q install -DskipTests -pl common -am` (χωρίς `-o`, γιατί το
+  install-plugin δεν είναι στο τοπικό repo), αλλιώς τα services βλέπουν το παλιό `common`.
+- ΜΗΝ τρέχεις `KafkaCollectorApplicationTests` (`@SpringBootTest`): θέλει βάση + Kafka και είναι αργό.
 - Μην τρέχεις όλο το test suite ή `package`/`clean` αν δεν σου το ζητήσουν.
-- Το Protobuf class (`IngestedRecordProto`) παράγεται στο compile από `src/main/proto/`· μην το επεξεργάζεσαι χειροκίνητα
-  και μην ψάχνεις το πηγαίο του στο `src/`.
+- Το Protobuf class (`IngestedRecordProto`) παράγεται στο compile του `common` από το `.proto`·
+  μην το επεξεργάζεσαι χειροκίνητα και μην ψάχνεις πηγαίο του στο `src/`.
+- **Χωρίς Lombok.** Αφαιρέθηκε στο Β3 (ένας annotation processor λιγότερος σε 4 modules):
+  ρητό `private static final Logger log = LoggerFactory.getLogger(X.class);`.
 
-## Δομή (`com.thesis.kafkacollector`)
+## Τα modules
+| Module | Τι είναι | Port |
+|---|---|---|
+| `common` | μόνο το Protobuf σχήμα (μία πηγή αλήθειας για όλους) | — |
+| `ingestion-service` | REST εισαγωγή → Kafka, consumer → βάση. Κατέχει το schema (Flyway) | 8080 |
+| `api-service` | read-only REST πάνω από τη βάση· **το μόνο** που τη διαβάζει | 8082 |
+| `analytics-ui-service` | UI + clustering/classification· καλεί ΜΟΝΟ το api-service | 8085 |
+
+Το UI δεν έχει ούτε driver βάσης στο classpath — η απομόνωση είναι δομική, όχι σύμβαση.
+
+## Δομή του ingestion-service (`com.thesis.kafkacollector`)
 - `controller/IngestionController`:
   - `POST /api/v1/upload` — JSON με `payload` μέσα, ή `fileType` + `filePath`. **Όλο το σώμα μπαίνει στη μνήμη**
     (και σε αντίγραφα: Jackson bind -> JsonNode -> JSON string ανά record). Για βολικά, μικρά-μεσαία φορτία.
@@ -47,7 +64,6 @@ TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
   έρχονται ως Lists στα headers.
 - `config/KafkaErrorHandlingConfig`: retries και DLQ. Το DLQ `KafkaTemplate` ΔΕΝ είναι bean επίτηδες — ένα δεύτερο
   `KafkaTemplate`/`ProducerFactory` στο context κάνει το KafkaAutoConfiguration να μην φτιάξει το κανονικό.
-- `service/KafkaConsumerService`: ολόκληρο σε σχόλια, νεκρός κώδικας· μην τον ξαναενεργοποιείς χωρίς λόγο.
 - `dto/IngestionRequest`: `sourceId`, `fileType`, `filePath`, `topic`, `createTopicIfMissing`, `partitions`,
   `keyField`, `payload`, `fieldMappings`.
 

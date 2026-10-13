@@ -7,7 +7,8 @@ import com.thesis.kafkacollector.proto.IngestedRecordProto;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -27,8 +28,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * που είναι απαραίτητο αφού ο consumer είναι at-least-once.
  */
 @Service
-@Slf4j
 public class IngestedRecordWriter {
+
+    private static final Logger log = LoggerFactory.getLogger(IngestedRecordWriter.class);
 
     /** event_time, topic, kafka_partition, kafka_offset, source_id, fields, payload */
     private static final int COLUMNS = 7;

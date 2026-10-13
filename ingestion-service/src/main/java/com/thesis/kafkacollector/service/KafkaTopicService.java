@@ -1,6 +1,7 @@
 package com.thesis.kafkacollector.service;
 
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.config.TopicBuilder;
@@ -22,8 +23,9 @@ import java.util.regex.Pattern;
  * τον broker σε κάθε request.
  */
 @Service
-@Slf4j
 public class KafkaTopicService {
+
+    private static final Logger log = LoggerFactory.getLogger(KafkaTopicService.class);
 
     private final KafkaAdmin kafkaAdmin;
     private final Map<String, Long> knownTopics = new ConcurrentHashMap<>();

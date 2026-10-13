@@ -8,7 +8,8 @@ import com.thesis.kafkacollector.proto.IngestedRecordProto;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
@@ -24,8 +25,9 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @Service
-@Slf4j
 public class FileStreamingService {
+
+    private static final Logger log = LoggerFactory.getLogger(FileStreamingService.class);
 
     // Το KafkaProtobufSerializer γράφει το schema στο Schema Registry και στέλνει το record με το schema id
     private final KafkaTemplate<String, IngestedRecordProto.IngestedRecord> kafkaTemplate;
