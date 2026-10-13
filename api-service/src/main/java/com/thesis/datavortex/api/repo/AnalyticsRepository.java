@@ -93,15 +93,29 @@ public class AnalyticsRepository {
                 source, field, Timestamp.from(from), Timestamp.from(to));
     }
 
-    /** Όλα τα αριθμητικά πεδία μιας πηγής σε έναν πίνακα κουβάδων × πεδίων, με ένα query. */
-    public Dtos.Matrix matrix(String source, List<String> fields, Instant from, Instant to, Buckets bucket) {
+    /**
+     * Όλα τα αριθμητικά πεδία μιας πηγής σε έναν πίνακα κουβάδων × πεδίων, με ένα query.
+     *
+     * @param agg τι αντιπροσωπεύει την τιμή του κουβά: {@code avg} για τη συμπεριφορά,
+     *            {@code max}/{@code min} για τις αιχμές. Ο μέσος όρος εξαφανίζει τις αιχμές
+     *            (μία αργή μέτρηση μέσα σε 80 γρήγορες δεν φαίνεται), άρα η ανίχνευση
+     *            ανωμαλιών χρειάζεται {@code max}.
+     */
+    public Dtos.Matrix matrix(String source, List<String> fields, Instant from, Instant to,
+                              Buckets bucket, String agg) {
+        String value = switch (agg == null ? "avg" : agg.toLowerCase()) {
+            case "max" -> "max(max_v)";
+            case "min" -> "min(min_v)";
+            case "avg" -> "sum(sum_v) / nullif(sum(n), 0)";
+            default -> throw new IllegalArgumentException("Άγνωστο agg '" + agg + "'. Δεκτά: avg, max, min.");
+        };
         String sql = """
-                SELECT bucket AS t, field, sum(n) AS n, sum(sum_v) AS sum_v
+                SELECT bucket AS t, field, sum(n) AS n, %s AS v
                 FROM %s
                 WHERE source_id = ? AND bucket >= ? AND bucket < ?
                   AND (?::boolean OR field = ANY (?::text[]))
                 GROUP BY bucket, field ORDER BY bucket
-                """.formatted(bucket.metricView());
+                """.formatted(value, bucket.metricView());
 
         boolean allFields = fields == null || fields.isEmpty();
         Map<Instant, Map<String, Double>> values = new LinkedHashMap<>();
@@ -112,8 +126,7 @@ public class AnalyticsRepository {
             Instant t = instant(rs.getTimestamp("t"));
             String field = rs.getString("field");
             long n = rs.getLong("n");
-            double avg = n > 0 ? rs.getDouble("sum_v") / n : 0.0;
-            values.computeIfAbsent(t, key -> new LinkedHashMap<>()).put(field, round(avg));
+            values.computeIfAbsent(t, key -> new LinkedHashMap<>()).put(field, round(rs.getDouble("v")));
             // Ένα πεδίο μπορεί να λείπει από κάποια μηνύματα· κρατάμε το μεγαλύτερο πλήθος
             // ως "πόσες εγγραφές είχε αυτός ο κουβάς".
             counts.merge(t, n, Math::max);

@@ -1,0 +1,342 @@
+package com.thesis.datavortex.analytics.profile;
+
+import com.thesis.datavortex.analytics.ml.Scaler;
+import com.thesis.datavortex.analytics.ml.Stats;
+import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+/**
+ * Τηλεμετρία υπολογιστικών πόρων (AI/ML, υποδομή).
+ * <p>
+ * Η ιδιαιτερότητα αυτών των δεδομένων: οι μετρήσεις <b>συνυπάρχουν σε καθεστώτα</b> — αδράνεια,
+ * κανονικό φορτίο, κορεσμός — και το ενδιαφέρον δεν είναι η απόλυτη τιμή αλλά ο <b>συνδυασμός</b>.
+ * Μια καθυστέρηση 200ms με χρήση 95% είναι αναμενόμενη· η ίδια καθυστέρηση με χρήση 10% είναι
+ * βλάβη. Γι' αυτό εδώ:
+ * <ul>
+ *   <li>ομαδοποιούμε σε καθεστώτα με k-means και ανθεκτική κλιμάκωση (οι αιχμές είναι κανόνας),</li>
+ *   <li>κατατάσσουμε με κανόνες πάνω σε ποσοστημόρια, ώστε το "ψηλά" να ορίζεται από τα ίδια
+ *       τα δεδομένα και όχι από σταθερά νούμερα που δεν ισχύουν για κάθε μηχάνημα,</li>
+ *   <li>και ψάχνουμε ρητά τον συνδυασμό "αργό χωρίς φορτίο", που κανένα z-score δεν θα έβρισκε.</li>
+ * </ul>
+ */
+@Component
+public class AiTelemetryProfile implements DataProfile {
+
+    private static final double ANOMALY_THRESHOLD = 3.5;
+    /** Πόσες ανθεκτικές τυπικές αποκλίσεις πάνω από τη διάμεσο θεωρείται "υψηλή" καθυστέρηση. */
+    private static final double LATENCY_Z = 2.5;
+
+    @Override
+    public String id() {
+        return "ai-telemetry";
+    }
+
+    @Override
+    public String title() {
+        return "Τηλεμετρία υπολογιστικών πόρων";
+    }
+
+    @Override
+    public String approach() {
+        return "k-means σε καθεστώτα φορτίου, κατάταξη με ποσοστημόρια, και ρητός έλεγχος για "
+                + "υψηλή καθυστέρηση χωρίς φορτίο";
+    }
+
+    @Override
+    public int score(String sourceId, Map<String, FieldRoles> roles) {
+        boolean hasCore = roles.containsValue(FieldRoles.UTILIZATION) || roles.containsValue(FieldRoles.LATENCY);
+        if (!hasCore) {
+            return 0;
+        }
+        int score = 2 * FieldRoles.countOf(roles, FieldRoles.UTILIZATION, FieldRoles.LATENCY,
+                FieldRoles.THROUGHPUT, FieldRoles.MEMORY, FieldRoles.ERRORS, FieldRoles.TEMPERATURE);
+        String name = sourceId.toLowerCase();
+        if (name.contains("telemetry") || name.contains("gpu") || name.contains("infra")
+                || name.contains("host") || name.contains("ai") || name.contains("ml")) {
+            score += 3;
+        }
+        return score;
+    }
+
+    @Override
+    public Analysis analyse(Input input) {
+        if (input.size() < 4 || input.fields().isEmpty()) {
+            return Profiles.empty(this, input, "Πολύ λίγα σημεία για ανάλυση σε αυτό το διάστημα.");
+        }
+        Map<String, FieldRoles> roles = FieldRoles.of(input.fields());
+        List<String> features = input.fields();
+
+        // Ανθεκτική κλιμάκωση: στην τηλεμετρία οι αιχμές είναι κανονικές, και ο μέσος όρος
+        // με την τυπική απόκλιση θα παρασύρονταν από αυτές.
+        Profiles.Clustering clustering = Profiles.cluster(input, features, Scaler.ROBUST, 2, 6);
+
+        // Οι ομάδες παίρνουν ονόματα κατά σειρά φορτίου, όχι κατά τον αριθμό που έτυχε στο k-means.
+        List<String> loadOrderedLabels = labelByLoad(clustering, roles);
+
+        double[] distances = Profiles.centroidDistances(clustering);
+        List<String> classes = classify(input, roles);
+        double[] anomalyScores = anomalyScores(input, features, distances);
+
+        // Για καθυστέρηση και σφάλματα κοιτάμε τις ΑΙΧΜΕΣ του κουβά: μια αργή μέτρηση μέσα σε
+        // ογδόντα γρήγορες δεν αλλάζει τον μέσο όρο, αλλά είναι ακριβώς αυτό που ψάχνουμε.
+        List<String> spikyFields = features.stream()
+                .filter(f -> FieldRoles.of(f) == FieldRoles.LATENCY || FieldRoles.of(f) == FieldRoles.ERRORS)
+                .toList();
+        List<String> smoothFields = features.stream().filter(f -> !spikyFields.contains(f)).toList();
+
+        List<Analysis.Anomaly> anomalies = new ArrayList<>(
+                Profiles.robustAnomalies(input, smoothFields, ANOMALY_THRESHOLD, 3, false));
+        anomalies.addAll(Profiles.robustAnomalies(input, spikyFields, ANOMALY_THRESHOLD, 5, true));
+        anomalies.addAll(slowWithoutLoad(input, roles));
+        anomalies.sort(Comparator.comparingDouble(Analysis.Anomaly::score).reversed());
+        List<Analysis.Anomaly> topAnomalies = anomalies.subList(0, Math.min(25, anomalies.size()));
+
+        List<Analysis.ClassCount> classCounts = Profiles.countClasses(classes);
+        return new Analysis(input.source(), id(), title(), input.bucket(), input.from(), input.to(),
+                input.size(), features,
+                "k-means (k=%d, silhouette %.2f) + κανόνες ποσοστημορίων"
+                        .formatted(clustering.result().k(), clustering.silhouette()),
+                Profiles.clusters(clustering, loadOrderedLabels, headlines(clustering, roles)),
+                Profiles.assignments(input, clustering, loadOrderedLabels, classes, anomalyScores),
+                topAnomalies, classCounts,
+                verdict(input, roles, classCounts, topAnomalies), 
+                Profiles.round(clustering.projection().explainedX() * 100),
+                Profiles.round(clustering.projection().explainedY() * 100));
+    }
+
+    /**
+     * Ονόματα ανά πλήθος ομάδων, ώστε η κλίμακα να βγάζει νόημα: με δύο ομάδες δεν λέμε
+     * «ελαφρύ φορτίο», και με τρεις η μεσαία είναι «κανονικό» και όχι «ακραίο».
+     */
+    private static final Map<Integer, List<String>> NAMES_BY_K = Map.of(
+            1, List.of("ενιαία συμπεριφορά"),
+            2, List.of("αδράνεια", "κορεσμός"),
+            3, List.of("αδράνεια", "κανονικό φορτίο", "κορεσμός"),
+            4, List.of("αδράνεια", "ελαφρύ φορτίο", "βαρύ φορτίο", "κορεσμός"),
+            5, List.of("αδράνεια", "ελαφρύ φορτίο", "κανονικό φορτίο", "βαρύ φορτίο", "κορεσμός"),
+            6, List.of("αδράνεια", "ελαφρύ φορτίο", "κανονικό φορτίο", "βαρύ φορτίο", "κορεσμός", "ακραίο"));
+
+    /** Δείκτης φορτίου ανά ομάδα: μέσος όρος των πεδίων που δείχνουν «πόσο δουλεύει». */
+    private List<String> labelByLoad(Profiles.Clustering clustering, Map<String, FieldRoles> roles) {
+        int k = clustering.result().k();
+        List<String> names = NAMES_BY_K.getOrDefault(k, NAMES_BY_K.get(6));
+        List<Integer> order = new ArrayList<>();
+        for (int c = 0; c < k; c++) {
+            order.add(c);
+        }
+        order.sort(Comparator.comparingDouble(c -> loadIndex(clustering.centroidsInRealUnits().get(c), roles)));
+
+        String[] labels = new String[k];
+        for (int rank = 0; rank < k; rank++) {
+            labels[order.get(rank)] = names.get(Math.min(rank, names.size() - 1));
+        }
+        return List.of(labels);
+    }
+
+    private static double loadIndex(Map<String, Double> centroid, Map<String, FieldRoles> roles) {
+        double sum = 0;
+        int count = 0;
+        for (Map.Entry<String, Double> e : centroid.entrySet()) {
+            FieldRoles role = roles.getOrDefault(e.getKey(), FieldRoles.OTHER);
+            if (role == FieldRoles.UTILIZATION || role == FieldRoles.MEMORY
+                    || role == FieldRoles.THROUGHPUT || role == FieldRoles.TEMPERATURE) {
+                sum += e.getValue();
+                count++;
+            }
+        }
+        // Χωρίς πεδία φορτίου, πέφτουμε στην καθυστέρηση: κι αυτή ανεβαίνει με το φορτίο.
+        if (count == 0) {
+            for (Map.Entry<String, Double> e : centroid.entrySet()) {
+                if (roles.getOrDefault(e.getKey(), FieldRoles.OTHER) == FieldRoles.LATENCY) {
+                    sum += e.getValue();
+                    count++;
+                }
+            }
+        }
+        return count == 0 ? 0 : sum / count;
+    }
+
+    private List<String> headlines(Profiles.Clustering clustering, Map<String, FieldRoles> roles) {
+        List<String> out = new ArrayList<>();
+        for (Map<String, Double> centroid : clustering.centroidsInRealUnits()) {
+            String utilisation = FieldRoles.first(roles, FieldRoles.UTILIZATION).orElse(null);
+            String latency = FieldRoles.first(roles, FieldRoles.LATENCY).orElse(null);
+            StringBuilder sb = new StringBuilder();
+            if (utilisation != null) {
+                sb.append("χρήση ").append(centroid.get(utilisation));
+            }
+            if (latency != null) {
+                sb.append(sb.isEmpty() ? "" : ", ").append("καθυστέρηση ").append(centroid.get(latency));
+            }
+            if (sb.isEmpty()) {
+                sb.append(centroid.entrySet().stream().findFirst()
+                        .map(e -> e.getKey() + " " + e.getValue()).orElse("—"));
+            }
+            out.add(sb.toString());
+        }
+        return out;
+    }
+
+    /**
+     * Κατάταξη με κανόνες πάνω σε ποσοστημόρια του ίδιου του διαστήματος. Σταθερά όρια
+     * (π.χ. «χρήση > 80%») δεν μεταφέρονται από μηχάνημα σε μηχάνημα· τα ποσοστημόρια, ναι.
+     */
+    private List<String> classify(Input input, Map<String, FieldRoles> roles) {
+        Optional<String> utilisation = FieldRoles.first(roles, FieldRoles.UTILIZATION);
+        Optional<String> latency = FieldRoles.first(roles, FieldRoles.LATENCY);
+
+        double[] util = utilisation.map(input::column).orElse(null);
+        double[] lat = latency.map(input::column).orElse(null);
+        // Τα ποσοστημόρια είναι ΣΧΕΤΙΚΑ: σε ένα πεδίο που κινείται από 45 έως 49, το ανώτερο
+        // 10% δεν είναι "κορεσμός" — είναι θόρυβος. Χωρίς αυτόν τον έλεγχο, απόλυτα ήρεμα
+        // δεδομένα θα χαρακτηρίζονταν κορεσμός και υποβάθμιση στο 20% του χρόνου.
+        boolean utilVaries = varies(util);
+        double utilHigh = util == null ? 0 : Stats.quantile(util, 0.90);
+        double utilMid = util == null ? 0 : Stats.quantile(util, 0.60);
+        double utilLow = util == null ? 0 : Stats.quantile(util, 0.20);
+        double utilMedian = util == null ? 0 : Stats.median(util);
+        // Η "υψηλή καθυστέρηση" δεν ορίζεται με ποσοστημόριο: σε μια σειρά 12-13ms με δύο
+        // αιχμές στα 900ms, το 90ό ποσοστημόριο είναι 13ms και θα χαρακτήριζε τα μισά σημεία
+        // αργά. Ανθεκτικό z ως προς τη διάμεσο: μόνο οι πραγματικές εξάρσεις μετρούν.
+        double latMedian = lat == null ? 0 : Stats.median(lat);
+        double latMad = lat == null ? 0 : Stats.mad(lat);
+
+        List<String> classes = new ArrayList<>(input.size());
+        for (int i = 0; i < input.size(); i++) {
+            double u = util == null ? Double.NaN : util[i];
+            double l = lat == null ? Double.NaN : lat[i];
+
+            double latZ = lat == null ? 0 : Math.abs(Stats.robustZ(l, latMedian, latMad));
+            if (lat != null && util != null && latZ >= LATENCY_Z && u <= utilMedian) {
+                // Το σημαντικό εύρημα: αργό χωρίς να δουλεύει. Δείχνει πρόβλημα, όχι φόρτο.
+                classes.add("υποβάθμιση");
+            } else if (util != null && utilVaries && u >= utilHigh) {
+                classes.add("κορεσμός");
+            } else if (util != null && utilVaries && u >= utilMid) {
+                classes.add("βαρύ φορτίο");
+            } else if (util != null && utilVaries && u <= utilLow) {
+                classes.add("αδράνεια");
+            } else if (util == null && lat != null && latZ >= LATENCY_Z) {
+                classes.add("αργό");
+            } else {
+                classes.add("κανονικό");
+            }
+        }
+        return classes;
+    }
+
+    /**
+     * Έχει το πεδίο αρκετή διασπορά για να βγάλουν νόημα τα ποσοστημόρια;
+     * Κριτήριο: το εύρος 10%–90% να είναι τουλάχιστον 15% του επιπέδου.
+     */
+    private static boolean varies(double[] column) {
+        if (column == null || column.length < 4) {
+            return false;
+        }
+        double level = Math.max(Math.abs(Stats.median(column)), 1e-9);
+        double spread = Stats.quantile(column, 0.90) - Stats.quantile(column, 0.10);
+        return spread / level >= 0.15;
+    }
+
+    private List<Analysis.Anomaly> slowWithoutLoad(Input input, Map<String, FieldRoles> roles) {
+        Optional<String> utilisation = FieldRoles.first(roles, FieldRoles.UTILIZATION);
+        Optional<String> latency = FieldRoles.first(roles, FieldRoles.LATENCY);
+        if (utilisation.isEmpty() || latency.isEmpty()) {
+            return List.of();
+        }
+        double[] util = input.column(utilisation.get());
+        double[] lat = input.peakColumn(latency.get()); // αιχμή καθυστέρησης, όχι μέσος όρος
+        double latMedian = Stats.median(lat);
+        double latMad = Stats.mad(lat);
+        double utilMedian = Stats.median(util);
+
+        List<Analysis.Anomaly> found = new ArrayList<>();
+        for (int i = 0; i < lat.length; i++) {
+            double z = Stats.robustZ(lat[i], latMedian, latMad);
+            if (z >= 2.5 && util[i] <= utilMedian) {
+                found.add(new Analysis.Anomaly(Profiles.at(input, i), latency.get(),
+                        Profiles.round(lat[i]), Profiles.round(latMedian), Profiles.round(z),
+                        "υψηλή καθυστέρηση με χαμηλή χρήση (" + Profiles.round(util[i]) + ")"));
+            }
+        }
+        return found;
+    }
+
+    private double[] anomalyScores(Input input, List<String> features, double[] distances) {
+        // Συνδυασμός: πόσο μακριά από το κέντρο της ομάδας + πόσο ακραία η χειρότερη μέτρηση.
+        double[] scores = new double[input.size()];
+        double distanceMedian = Stats.median(distances);
+        double distanceMad = Stats.mad(distances);
+        for (int i = 0; i < input.size(); i++) {
+            double worst = 0;
+            for (String field : features) {
+                double[] column = input.column(field);
+                double z = Math.abs(Stats.robustZ(column[i], Stats.median(column), Stats.mad(column)));
+                worst = Math.max(worst, z);
+            }
+            double distanceZ = Math.abs(Stats.robustZ(distances[i], distanceMedian, distanceMad));
+            scores[i] = Math.max(worst, distanceZ);
+        }
+        return scores;
+    }
+
+    private Analysis.Verdict verdict(Input input, Map<String, FieldRoles> roles,
+                                     List<Analysis.ClassCount> classes, List<Analysis.Anomaly> anomalies) {
+        double saturated = share(classes, "κορεσμός");
+        double degraded = share(classes, "υποβάθμιση");
+        double idle = share(classes, "αδράνεια");
+        double anomalyRate = 100.0 * anomalies.size() / Math.max(1, input.size());
+
+        int score = (int) Math.round(100
+                - degraded * 1.2      // η υποβάθμιση είναι το χειρότερο σημάδι
+                - saturated * 0.5
+                - Math.min(30, anomalyRate * 2));
+        score = Math.max(0, Math.min(100, score));
+
+        List<String> findings = new ArrayList<>();
+        if (degraded > 2) {
+            findings.add("Στο %.0f%% των κουβάδων υπάρχει υψηλή καθυστέρηση ΧΩΡΙΣ αντίστοιχο φορτίο — αυτό δεν εξηγείται από τη ζήτηση."
+                    .formatted(degraded));
+        }
+        if (saturated > 25) {
+            findings.add("Κορεσμός στο %.0f%% του διαστήματος: ο πόρος δουλεύει στα όριά του."
+                    .formatted(saturated));
+        }
+        if (idle > 60) {
+            findings.add("Αδράνεια στο %.0f%% του διαστήματος: υπάρχει περιθώριο για πιο πυκνή χρήση."
+                    .formatted(idle));
+        }
+        FieldRoles.first(roles, FieldRoles.LATENCY).ifPresent(field -> {
+            double trend = Stats.trendPerSample(input.column(field)) * input.size() * 100;
+            if (Math.abs(trend) > 15) {
+                findings.add("Η %s %s κατά %.0f%% μέσα στο διάστημα."
+                        .formatted(field, trend > 0 ? "ανεβαίνει" : "πέφτει", Math.abs(trend)));
+            }
+        });
+        if (!anomalies.isEmpty()) {
+            findings.add("%d ανωμαλίες, η εντονότερη στο %s (%s)."
+                    .formatted(anomalies.size(), anomalies.get(0).field(), anomalies.get(0).reason()));
+        }
+        if (findings.isEmpty()) {
+            findings.add("Καμία αξιοσημείωτη απόκλιση στο διάστημα.");
+        }
+
+        String status = score >= 80 ? "OK" : score >= 55 ? "WATCH" : "ALERT";
+        String headline = switch (status) {
+            case "OK" -> "Σταθερή λειτουργία";
+            case "WATCH" -> "Αξίζει προσοχή";
+            default -> "Χρειάζεται παρέμβαση";
+        };
+        return new Analysis.Verdict(score, status, headline, findings);
+    }
+
+    private static double share(List<Analysis.ClassCount> classes, String name) {
+        return classes.stream().filter(c -> c.className().equals(name))
+                .mapToDouble(Analysis.ClassCount::share).findFirst().orElse(0);
+    }
+}
