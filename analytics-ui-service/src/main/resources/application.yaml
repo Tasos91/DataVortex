@@ -1,0 +1,24 @@
+spring:
+  application:
+    name: datavortex-analytics-ui
+
+datavortex:
+  # Πού ζει το api-service. Το UI δεν ξέρει τίποτα για τη βάση.
+  api-base-url: ${API_BASE_URL:http://localhost:8082}
+
+server:
+  port: ${UI_PORT:8085}
+  compression:
+    enabled: true
+    mime-types: application/json,text/html,text/css,application/javascript
+    min-response-size: 1024
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
