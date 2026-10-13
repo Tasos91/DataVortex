@@ -9,9 +9,15 @@
       url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:bigdata_db}
       username: ${DB_USER:postgres}
       password: ${DB_PASS:postgres}
+    # Το schema το φτιάχνει το Flyway (db/migration), ΟΧΙ το Hibernate: ο πίνακας είναι
+    # TimescaleDB hypertable με συμπίεση, πράγματα που το ddl-auto δεν ξέρει να φτιάξει
+    # και θα τα χαλούσε.
+    flyway:
+      enabled: true
+      baseline-on-migrate: true
     jpa:
       hibernate:
-        ddl-auto: update # Ή 'validate' σε production
+        ddl-auto: none
       show-sql: false
 
     # ----------------------------------------------------

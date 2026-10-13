@@ -37,11 +37,13 @@
 		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter-data-jpa</artifactId>
+			<artifactId>spring-boot-starter-integration</artifactId>
 		</dependency>
+		<!-- JDBC και όχι JPA: τα inserts γίνονται με JdbcTemplate σε batches.
+		     Το Hibernate απενεργοποιεί το JDBC batching με IDENTITY ids, και δεν έχουμε entities. -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter-integration</artifactId>
+			<artifactId>spring-boot-starter-jdbc</artifactId>
 		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
@@ -70,10 +72,6 @@
 		</dependency>
 		<dependency>
 			<groupId>org.springframework.integration</groupId>
-			<artifactId>spring-integration-jpa</artifactId>
-		</dependency>
-		<dependency>
-			<groupId>org.springframework.integration</groupId>
 			<artifactId>spring-integration-kafka</artifactId>
 		</dependency>
 
@@ -99,11 +97,6 @@
 		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter-data-jpa-test</artifactId>
-			<scope>test</scope>
-		</dependency>
-		<dependency>
-			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-kafka-test</artifactId>
 			<scope>test</scope>
 		</dependency>
@@ -121,6 +114,17 @@
 			<groupId>org.springframework.integration</groupId>
 			<artifactId>spring-integration-test</artifactId>
 			<scope>test</scope>
+		</dependency>
+		<!-- Flyway: το schema της βάσης (hypertable + συμπίεση) σε versioned SQL.
+		     Στο Spring Boot 4 το auto-configuration είναι σε ξεχωριστό module (spring-boot-starter-flyway):
+		     μόνο με το flyway-core στο classpath δεν τρέχει τίποτα στο startup. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-flyway</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.flywaydb</groupId>
+			<artifactId>flyway-database-postgresql</artifactId>
 		</dependency>
 		<!-- Confluent Protobuf serializer: στέλνει/διαβάζει Protobuf μέσω του Schema Registry -->
 		<dependency>
