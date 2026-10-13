@@ -1,7 +1,8 @@
 # datavortex
 
 Spring Boot 4 / Java 21 εφαρμογή (διπλωματική): δέχεται δεδομένα μέσω REST, τα μετατρέπει σε
-Protobuf και τα στέλνει στο Kafka· ένας consumer τα διαβάζει πίσω και τροφοδοτεί ένα dashboard.
+Protobuf και τα στέλνει στο Kafka· ένας batch consumer τα διαβάζει πίσω και τα αποθηκεύει σε
+TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
 Η υπόλοιπη περιγραφή εδώ είναι μόνο ό,τι δεν φαίνεται εύκολα από τον κώδικα.
 
 ## Εντολές (το μηχάνημα έχει αργή CPU, 4 πυρήνες: τρέχε το ελάχιστο)
@@ -24,7 +25,6 @@ Protobuf και τα στέλνει στο Kafka· ένας consumer τα δια
 - `config/KafkaErrorHandlingConfig`: retries και DLQ. Το DLQ `KafkaTemplate` ΔΕΝ είναι bean επίτηδες — ένα δεύτερο
   `KafkaTemplate`/`ProducerFactory` στο context κάνει το KafkaAutoConfiguration να μην φτιάξει το κανονικό.
 - `service/KafkaConsumerService`: ολόκληρο σε σχόλια, νεκρός κώδικας· μην τον ξαναενεργοποιείς χωρίς λόγο.
-- `entity/IngestedRecord` + `repository/`: JPA για Postgres (πίνακας `ingested_records`). Προς το παρόν ο consumer ΔΕΝ γράφει εκεί.
 - `dto/IngestionRequest`: `sourceId`, `fileType`, `filePath`, `topic`, `createTopicIfMissing`, `partitions`,
   `keyField`, `payload`, `fieldMappings`.
 
@@ -57,11 +57,31 @@ Protobuf και τα στέλνει στο Kafka· ένας consumer τα δια
 - Στο Spring Boot 4 το MVC χρησιμοποιεί Jackson 3, ενώ ο κώδικας χρησιμοποιεί `com.fasterxml` (Jackson 2). Γι' αυτό το
   `payload` στο DTO είναι `Object` και όχι `JsonNode`· μην το αλλάξεις.
 
+## Βάση δεδομένων
+- **TimescaleDB** (`timescale/timescaledb:2.30.2-pg17`), δηλαδή PostgreSQL + extension χρονοσειρών.
+  Ίδιο SQL, ίδιος driver. Volume `tsdata`· το παλιό `pgdata` (postgres:15) μένει άθικτο και δεν χρησιμοποιείται.
+- **ΧΩΡΙΣ JPA/Hibernate.** Δεν υπάρχουν entities· γράφουμε με `JdbcTemplate` σε batches. Λόγος: το Hibernate
+  απενεργοποιεί το JDBC batching με `@GeneratedValue(IDENTITY)`, που σημαίνει ένα INSERT ανά record.
+  Αν χρειαστεί JPA για μικρούς πίνακες, πρόσθεσε πίσω το `spring-boot-starter-data-jpa`.
+- **Το schema το φτιάχνει το Flyway** (`src/main/resources/db/migration/`), όχι το `ddl-auto` (είναι `none`).
+  Στο Spring Boot 4 χρειάζεται το `spring-boot-starter-flyway`: μόνο με το `flyway-core` δεν τρέχει τίποτα.
+  Νέα αλλαγή schema = νέο αρχείο `V2__...sql`· ΜΗΝ επεξεργάζεσαι migration που έχει τρέξει.
+- Πίνακας `ingested_records`: hypertable με διάσταση χρόνου `event_time` (chunks ανά ημέρα), συμπίεση μετά
+  από 7 ημέρες (`segmentby = topic`), και `PRIMARY KEY (event_time, topic, kafka_partition, kafka_offset)`.
+- **Idempotency:** ο consumer είναι at-least-once, άρα τα διπλά είναι αναμενόμενα. Το `(topic, partition, offset)`
+  του Kafka είναι μοναδικό, οπότε `INSERT ... ON CONFLICT DO NOTHING` αρκεί — δοκιμασμένο ότι δουλεύει και σε
+  συμπιεσμένο chunk. Το `event_time` ΠΡΕΠΕΙ να είναι το timestamp του μηνύματος Kafka (σταθερό σε κάθε
+  επανάληψη), όχι `now()`, αλλιώς το dedup δεν πιάνει.
+- Το TimescaleDB απαιτεί τη διάσταση χρόνου σε κάθε unique index, και τα `segmentby` columns πρέπει να είναι
+  μέσα στο unique index· γι' αυτό το `segmentby` είναι μόνο `topic` και όχι `topic, source_id`.
+- ΔΕΝ υπάρχει retention policy (θα έσβηνε δεδομένα). Οδηγία για το πώς μπαίνει: στο V1 migration.
+
 ## Ρυθμίσεις και υποδομή
 - `application.yaml`: port 8080, topic `ais-data` (`KAFKA_TOPIC`), brokers `localhost:9092`, Postgres `localhost:5432/bigdata_db`.
-  Όλα με env overrides· `ddl-auto: update`.
-- `docker-compose.yml` (στη ρίζα): postgres:15, kafka (cp 7.6.0, KRaft), schema-registry (:8081, ΑΠΑΡΑΙΤΗΤΟ για producer και consumer), prometheus, grafana.
+  Όλα με env overrides.
+- `docker-compose.yml` (στη ρίζα): timescaledb (service `postgres`), kafka (cp 7.6.0, KRaft), schema-registry (:8081, ΑΠΑΡΑΙΤΗΤΟ για producer και consumer), prometheus, grafana.
   Δεν έχει όρια μνήμης. Ξεκίνα μόνο ό,τι χρειάζεται: `docker compose up -d postgres kafka schema-registry`.
+  Η εφαρμογή ΔΕΝ ξεκινά χωρίς τη βάση (το Flyway τρέχει στο startup).
 - Τα topics ΔΕΝ δημιουργούνται αυτόματα, ούτε από τον broker ούτε από τον binder. Είτε φτιάξ' το με
   `kafka-topics --create`, είτε στείλε `createTopicIfMissing: true`.
 

@@ -5,7 +5,9 @@ services:
   # 1. PostgreSQL (Βάση Δεδομένων)
   # ----------------------------------------------------
   postgres:
-    image: postgres:15
+    # TimescaleDB = PostgreSQL + extension για χρονοσειρές (hypertables, συμπίεση).
+    # Ίδιος driver και ίδιο SQL· αλλάζει μόνο το image.
+    image: timescale/timescaledb:2.30.2-pg17
     container_name: thesis-postgres
     ports:
       - "5432:5432" # Το port που ορισες στο application.yml
@@ -14,7 +16,14 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: bigdata_db
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # Νέο volume: το pg17 δεν διαβάζει data directory του pg15, και το παλιό
+      # pgdata μένει άθικτο σε περίπτωση που το χρειαστείς.
+      - tsdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d bigdata_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     networks:
       - thesis-net
 
@@ -94,4 +103,5 @@ networks:
     driver: bridge
 
 volumes:
-  pgdata:
+  pgdata:   # παλιό postgres:15, δεν χρησιμοποιείται πια
+  tsdata:
