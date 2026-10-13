@@ -41,6 +41,20 @@ class RecordMapperTest {
     }
 
     @Test
+    void messageKeyComesFromKeyField() throws Exception {
+        JsonNode root = new ObjectMapper().readTree(PAYLOAD);
+
+        assertEquals("x", RecordMapper.keyOf(root, "name"));
+        assertEquals("10000.0", RecordMapper.keyOf(root, "$.ethusdt.max"));
+        assertEquals("1", RecordMapper.keyOf(root, "$.items[0].p"));
+        // Χωρίς keyField, ή με διαδρομή που δεν βρίσκει τιμή, το μήνυμα φεύγει χωρίς κλειδί
+        // (μοιράζεται σε όλα τα partitions).
+        assertNull(RecordMapper.keyOf(root, null));
+        assertNull(RecordMapper.keyOf(root, "  "));
+        assertNull(RecordMapper.keyOf(root, "$.nope.x"));
+    }
+
+    @Test
     void nullMappingsAreAccepted() throws Exception {
         JsonNode root = new ObjectMapper().readTree(PAYLOAD);
         assertEquals(0, RecordMapper.map("s", PAYLOAD, root, null).getFieldsCount());
