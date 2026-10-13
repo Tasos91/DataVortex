@@ -15,7 +15,14 @@ TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
   και μην ψάχνεις το πηγαίο του στο `src/`.
 
 ## Δομή (`com.thesis.kafkacollector`)
-- `controller/IngestionController`: `POST /api/v1/upload` (το μόνο write endpoint).
+- `controller/IngestionController`:
+  - `POST /api/v1/upload` — JSON με `payload` μέσα, ή `fileType` + `filePath`. **Όλο το σώμα μπαίνει στη μνήμη**
+    (και σε αντίγραφα: Jackson bind -> JsonNode -> JSON string ανά record). Για βολικά, μικρά-μεσαία φορτία.
+  - `POST /api/v1/stream` — **NDJSON** για μεγάλο όγκο: πρώτη γραμμή οι ρυθμίσεις, μετά μία εγγραφή ανά γραμμή.
+    Στη μνήμη βρίσκεται μία γραμμή τη φορά· μια χαλασμένη γραμμή προσπερνιέται και μετριέται.
+  - Και τα δύο: `200` μετά το `flush()` του producer (άρα το 200 σημαίνει "είναι στο Kafka"), `207` αν κάποια
+    μηνύματα απέτυχαν, `400` για λάθος request, `429` όταν τρέχουν ήδη `datavortex.max-concurrent-ingests`
+    εισαγωγές, `503` όταν ο broker δεν απαντά.
 - `controller/DashboardController`: `/dashboard` (HTML) και `/dashboard/api/stats`.
 - `service/FileStreamingService`: CSV, JSON αρχείο και inline `payload` → Protobuf → Kafka.
 - `service/KafkaTopicService`: ελέγχει/δημιουργεί το topic του request (fail-fast, με cache).
@@ -61,6 +68,12 @@ TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
 - **Αν πέσει η βάση δεν πάει τίποτα στο DLQ:** ο `setBackOffFunction` δίνει άπειρα retries στα σφάλματα
   υποδομής (`CannotGetJdbcConnectionException`, `DataAccessResourceFailureException`, ...). Τα offsets δεν
   γίνονται commit, το Kafka κρατά τα δεδομένα, και η ροή συνεχίζει μόλις επανέλθει η βάση.
+- **Η απάντηση περιμένει τα acks** (`kafkaTemplate.flush()` στο `finish()`). Πριν, η απάντηση έλεγε
+  "στάλθηκαν N" ενώ τα μηνύματα ήταν ακόμα στο buffer του producer: αν έπεφτε το Kafka, ο client είχε 200
+  και τα δεδομένα δεν υπήρχαν πουθενά. ΜΗΝ αφαιρέσεις το flush.
+- **Backpressure:** semaphore `datavortex.max-concurrent-ingests` (default 4) και `max.block.ms: 10000` στον
+  producer. Χωρίς αυτά, αρκετά ταυτόχρονα requests γεμίζουν το `buffer-memory` και μπλοκάρουν όλα τα Tomcat
+  threads μέσα στο `send()` για 60s.
 - Στο Spring Boot 4 το MVC χρησιμοποιεί Jackson 3, ενώ ο κώδικας χρησιμοποιεί `com.fasterxml` (Jackson 2). Γι' αυτό το
   `payload` στο DTO είναι `Object` και όχι `JsonNode`· μην το αλλάξεις.
 
@@ -102,6 +115,9 @@ TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
 - Μέσο batch ~467 μηνύματα, 214 batches.
 - Πλήρες replay του topic: 0 νέες γραμμές (120.003 πριν και μετά), 121.386 διπλά απορρίφθηκαν από τη βάση.
 - Βάση κάτω για 25s: 0 μηνύματα στο DLQ, όλα γράφτηκαν μόλις επανήλθε.
+- NDJSON 200.000 εγγραφές (25MB): 11,5s το publish, 31s μέχρι να είναι όλα στη βάση, και η μνήμη της JVM
+  ανέβηκε μόνο 85MB (548 -> 634MB).
+- 8 ταυτόχρονα requests με όριο 4: 4 x 200 και 4 x 429.
 
 ## Στυλ
 - Σχόλια και μηνύματα log στα ελληνικά (όπως ο υπάρχων κώδικας). Lombok `@Slf4j` όπου ήδη χρησιμοποιείται.
