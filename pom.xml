@@ -40,6 +40,14 @@
 
 	<dependencyManagement>
 		<dependencies>
+			<!-- Το Boot ορίζει την έκδοση αλλά δεν εισάγει το BOM του Testcontainers -->
+			<dependency>
+				<groupId>org.testcontainers</groupId>
+				<artifactId>testcontainers-bom</artifactId>
+				<version>${testcontainers.version}</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
 			<dependency>
 				<groupId>org.springframework.cloud</groupId>
 				<artifactId>spring-cloud-dependencies</artifactId>
