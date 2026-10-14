@@ -1,4 +1,9 @@
   spring:
+    # Virtual threads: η εισαγωγή περιμένει σε Kafka και βάση, όχι σε CPU.
+    threads:
+      virtual:
+        enabled: true
+
     application:
       name: data-vortex
 
@@ -151,3 +156,7 @@
 
   server:
     port: 8080
+    compression:
+      enabled: true
+      mime-types: application/json,text/html
+      min-response-size: 1024

@@ -34,28 +34,59 @@ public final class Silhouette {
         return total / data.length;
     }
 
+    /** Πάνω από τόσα σημεία, η αναζήτηση του k γίνεται σε δείγμα. */
+    private static final int SEARCH_SAMPLE = 250;
+    /** Στην αναζήτηση αρκούν δύο εκκινήσεις· η τελική προσαρμογή παίρνει τις κανονικές. */
+    private static final int SEARCH_RESTARTS = 2;
+
     /**
      * Δοκιμάζει k από {@code minK} έως {@code maxK} και κρατά το καλύτερο silhouette.
-     *
-     * @return το καλύτερο αποτέλεσμα, μαζί με τον δείκτη του
+     * <p>
+     * Δύο επιταχύνσεις που δεν αλλάζουν το αποτέλεσμα σε τίποτα ουσιαστικό:
+     * <ul>
+     *   <li>η <b>αναζήτηση</b> γίνεται σε δείγμα (κάθε k-οστό σημείο) όταν τα δεδομένα είναι
+     *       πολλά — το ποιο k ταιριάζει δεν αλλάζει αν κοιτάξεις 400 αντί για 4.000 σημεία·</li>
+     *   <li>σταματά όταν ο δείκτης πέσει δύο φορές συνεχόμενα, αφού είναι σχεδόν πάντα
+     *       μονοκόρυφος ως συνάρτηση του k.</li>
+     * </ul>
+     * Η τελική προσαρμογή γίνεται πάντα στα <b>πλήρη</b> δεδομένα.
      */
     public static Best chooseK(double[][] data, int minK, int maxK) {
         int upper = Math.min(maxK, Math.max(1, data.length - 1));
-        KMeans.Result best = null;
+        double[][] sample = subsample(data);
+
+        int bestK = -1;
         double bestScore = Double.NEGATIVE_INFINITY;
+        int drops = 0;
         for (int k = Math.max(2, minK); k <= upper; k++) {
-            KMeans.Result candidate = KMeans.fit(data, k);
-            double score = score(data, candidate);
+            double score = score(sample, KMeans.fit(sample, k, SEARCH_RESTARTS));
             if (score > bestScore) {
                 bestScore = score;
-                best = candidate;
+                bestK = k;
+                drops = 0;
+            } else if (++drops >= 2) {
+                break;
             }
         }
-        if (best == null) {
+        if (bestK < 0) {
             // Λιγότερα δείγματα από ομάδες: μία ομάδα είναι η μόνη έντιμη απάντηση.
             return new Best(KMeans.fit(data, 1), -1);
         }
-        return new Best(best, bestScore);
+        KMeans.Result result = KMeans.fit(data, bestK);
+        return new Best(result, sample.length == data.length ? bestScore : score(data, result));
+    }
+
+    /** Κάθε n-οστό σημείο· ντετερμινιστικό, ώστε το ίδιο input να δίνει το ίδιο k. */
+    private static double[][] subsample(double[][] data) {
+        if (data.length <= SEARCH_SAMPLE) {
+            return data;
+        }
+        int stride = (int) Math.ceil((double) data.length / SEARCH_SAMPLE);
+        double[][] sample = new double[(data.length + stride - 1) / stride][];
+        for (int i = 0, j = 0; i < data.length && j < sample.length; i += stride, j++) {
+            sample[j] = data[i];
+        }
+        return sample;
     }
 
     public record Best(KMeans.Result result, double score) {}

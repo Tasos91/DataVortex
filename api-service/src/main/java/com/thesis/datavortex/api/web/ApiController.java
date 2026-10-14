@@ -107,8 +107,15 @@ public class ApiController {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(e.getMessage());
     }
 
+    /** Στρογγυλοποίηση στα 30s όταν λείπει το 'to': χωρίς αυτό κάθε request έχει άλλο κλειδί
+     *  cache (το «τώρα» αλλάζει συνεχώς) και το cache δεν χτυπά ποτέ. */
+    private static Instant snap(Instant moment) {
+        long grain = 30_000L;
+        return Instant.ofEpochMilli(moment.toEpochMilli() / grain * grain);
+    }
+
     private static Instant[] range(Instant from, Instant to) {
-        Instant end = to != null ? to : Instant.now();
+        Instant end = to != null ? to : snap(Instant.now());
         Instant start = from != null ? from : end.minus(DEFAULT_RANGE);
         if (!start.isBefore(end)) {
             throw new IllegalArgumentException("Το 'from' πρέπει να είναι πριν από το 'to'.");

@@ -22,6 +22,15 @@ public class AnalyticsConfig {
     @Value("${datavortex.cache.ttl-seconds:15}")
     private long ttlSeconds;
 
+    /**
+     * Virtual threads για τις παράλληλες κλήσεις προς το api-service. Είναι καθαρή αναμονή
+     * δικτύου: δεν χρειάζεται pool με ακριβά threads, και τα 4 CPU μένουν ελεύθερα για την ανάλυση.
+     */
+    @Bean(destroyMethod = "close")
+    public java.util.concurrent.ExecutorService apiExecutor() {
+        return java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
+    }
+
     @Bean
     public CacheManager cacheManager(MeterRegistry registry) {
         CaffeineCacheManager manager = new CaffeineCacheManager("analysis", "proxy");

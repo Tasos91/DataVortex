@@ -11,6 +11,8 @@ package com.thesis.datavortex.analytics.ml;
 public final class Pca {
 
     private static final int ITERATIONS = 200;
+    /** Σταματάμε όταν το διάνυσμα δεν κινείται πια· 200 επαναλήψεις είναι το ταβάνι, όχι ο κανόνας. */
+    private static final double CONVERGED = 1e-10;
 
     private Pca() {}
 
@@ -102,10 +104,15 @@ public final class Pca {
             if (norm < 1e-12) {
                 return v;
             }
+            double movement = 0;
             for (int a = 0; a < d; a++) {
                 next[a] /= norm;
+                movement += Math.abs(next[a] - v[a]);
             }
             v = next;
+            if (movement < CONVERGED) {
+                break;
+            }
         }
         return v;
     }

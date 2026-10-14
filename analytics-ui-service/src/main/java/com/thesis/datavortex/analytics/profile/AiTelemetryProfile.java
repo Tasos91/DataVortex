@@ -269,18 +269,30 @@ public class AiTelemetryProfile implements DataProfile {
 
     private double[] anomalyScores(Input input, List<String> features, double[] distances) {
         // Συνδυασμός: πόσο μακριά από το κέντρο της ομάδας + πόσο ακραία η χειρότερη μέτρηση.
+        //
+        // ΠΡΟΣΟΧΗ: διάμεσος και MAD κάθε πεδίου υπολογίζονται ΜΙΑ φορά, έξω από τον βρόχο των
+        // σημείων. Μέσα στον βρόχο ήταν δύο ταξινομήσεις ανά σημείο ανά πεδίο — O(n² log n) —
+        // και κόστιζαν 250ms από τα 385ms της ανάλυσης, για δουλειά που γίνεται σε 1ms.
         double[] scores = new double[input.size()];
         double distanceMedian = Stats.median(distances);
         double distanceMad = Stats.mad(distances);
+
+        int fieldCount = features.size();
+        double[][] columns = new double[fieldCount][];
+        double[] medians = new double[fieldCount];
+        double[] mads = new double[fieldCount];
+        for (int f = 0; f < fieldCount; f++) {
+            columns[f] = input.column(features.get(f));
+            medians[f] = Stats.median(columns[f]);
+            mads[f] = Stats.mad(columns[f]);
+        }
+
         for (int i = 0; i < input.size(); i++) {
-            double worst = 0;
-            for (String field : features) {
-                double[] column = input.column(field);
-                double z = Math.abs(Stats.robustZ(column[i], Stats.median(column), Stats.mad(column)));
-                worst = Math.max(worst, z);
+            double worst = Math.abs(Stats.robustZ(distances[i], distanceMedian, distanceMad));
+            for (int f = 0; f < fieldCount; f++) {
+                worst = Math.max(worst, Math.abs(Stats.robustZ(columns[f][i], medians[f], mads[f])));
             }
-            double distanceZ = Math.abs(Stats.robustZ(distances[i], distanceMedian, distanceMad));
-            scores[i] = Math.max(worst, distanceZ);
+            scores[i] = worst;
         }
         return scores;
     }
