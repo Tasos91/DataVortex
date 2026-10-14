@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DataVortex — εισαγωγή CSV</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🌀</text></svg>">
+<style>
+  :root {
+    --bg: #080b11; --panel: #121824; --panel-2: #192132; --line: #243049; --line-2: #2f3d5c;
+    --text: #e8eef7; --dim: #8e9bb3; --faint: #5d6a82;
+    --accent: #4da3ff; --ok: #35d07f; --warn: #ffb224; --bad: #ff5c57; --violet: #b78cff;
+    --radius: 16px; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.6);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; color: var(--text);
+    background:
+      radial-gradient(1100px 500px at 12% -8%, rgba(77,163,255,.10), transparent 60%),
+      radial-gradient(900px 420px at 88% -12%, rgba(183,140,255,.09), transparent 60%),
+      var(--bg);
+    font: 14px/1.55 "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  header {
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+    padding: 14px 24px; border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: blur(14px);
+    position: sticky; top: 0; z-index: 20;
+  }
+  .brand { display: flex; align-items: center; gap: 11px; margin-right: auto; }
+  .brand .logo {
+    width: 34px; height: 34px; display: grid; place-items: center; border-radius: 11px; font-size: 18px;
+    background: linear-gradient(145deg, rgba(77,163,255,.9), rgba(183,140,255,.75));
+    box-shadow: 0 0 22px -4px rgba(77,163,255,.6);
+  }
+  .brand h1 { margin: 0; font-size: 17px; font-weight: 650; }
+  .brand .sub { margin: 0; color: var(--dim); font-size: 11.5px; }
+  main { max-width: 1180px; margin: 0 auto; padding: 22px 24px 60px; }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+          box-shadow: var(--shadow); padding: 18px 20px; margin-bottom: 18px; }
+  .card > h2 { margin: 0 0 4px; font-size: 14px; font-weight: 600; letter-spacing: .2px;
+               display: flex; align-items: center; gap: 9px; }
+  .card > h2 .n { width: 21px; height: 21px; display: grid; place-items: center; flex: none;
+                  border-radius: 7px; font-size: 11.5px; background: var(--panel-2);
+                  border: 1px solid var(--line-2); color: var(--accent); }
+  .card > .hint { margin: 0 0 14px 30px; color: var(--faint); font-size: 12px; }
+
+  /* ------------------------------------------------------------- drop zone */
+  #drop {
+    border: 1.5px dashed var(--line-2); border-radius: 14px; padding: 34px 20px; text-align: center;
+    cursor: pointer; transition: border-color .18s, background .18s, transform .1s;
+    background: linear-gradient(180deg, rgba(77,163,255,.035), transparent);
+  }
+  #drop:hover, #drop.over { border-color: var(--accent); background: rgba(77,163,255,.08); }
+  #drop.over { transform: scale(1.005); }
+  #drop .big { font-size: 30px; }
+  #drop .t { font-size: 14.5px; font-weight: 550; margin-top: 6px; }
+  #drop .s { color: var(--faint); font-size: 12px; margin-top: 3px; }
+  #file { display: none; }
+
+  /* --------------------------------------------------------------- widgets */
+  label.f { display: flex; flex-direction: column; gap: 5px; font-size: 10.5px; color: var(--faint);
+            text-transform: uppercase; letter-spacing: .6px; }
+  input, select, button { font: inherit; color: var(--text); }
+  input[type=text], input[type=number], select {
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px;
+    padding: 7px 9px; font-size: 13px; text-transform: none; letter-spacing: 0;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  .btn { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+         padding: 9px 16px; font-size: 13px; cursor: pointer; transition: all .15s; }
+  .btn:hover:not(:disabled) { border-color: var(--line-2); background: #1f283c; }
+  .btn.primary { background: linear-gradient(145deg, var(--accent), #2d7fd8); border-color: transparent;
+                 color: #04101f; font-weight: 600; }
+  .btn.primary:hover:not(:disabled) { filter: brightness(1.1); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 12px; }
+
+  /* ---------------------------------------------------------------- πίνακας */
+  .tablewrap { overflow-x: auto; margin: 0 -4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 7px 9px; color: var(--faint); font-size: 10.5px; font-weight: 600;
+       text-transform: uppercase; letter-spacing: .6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { padding: 6px 9px; border-bottom: 1px solid rgba(36,48,73,.5); vertical-align: middle; }
+  tr.off td { opacity: .35; }
+  tr:hover td { background: rgba(77,163,255,.04); }
+  td.name { font-weight: 550; font-family: "SF Mono", ui-monospace, monospace; font-size: 12.5px; }
+  td.samples { color: var(--dim); font-size: 11.5px; font-family: ui-monospace, monospace;
+               max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  td.range { color: var(--dim); font-size: 11.5px; white-space: nowrap; }
+  select.role, select.type { padding: 4px 7px; font-size: 12px; border-radius: 7px; }
+  .cover { display: flex; align-items: center; gap: 7px; }
+  .cover .bar { width: 46px; height: 5px; border-radius: 3px; background: var(--panel-2); overflow: hidden; flex: none; }
+  .cover .bar i { display: block; height: 100%; background: var(--ok); }
+  .cover .bar i.part { background: var(--warn); }
+  .cover .bar i.none { background: var(--bad); }
+  .cover span { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10.5px;
+          font-weight: 600; letter-spacing: .3px; }
+  .pill.number { background: rgba(77,163,255,.16); color: #8ec5ff; }
+  .pill.text { background: rgba(142,155,179,.16); color: var(--dim); }
+  .pill.timestamp { background: rgba(183,140,255,.16); color: #cfb0ff; }
+  .pill.bool { background: rgba(53,208,127,.16); color: #74e2a8; }
+
+  .notes { margin: 12px 0 0; padding: 0; list-style: none; }
+  .notes li { display: flex; gap: 8px; padding: 7px 10px; margin-top: 6px; font-size: 12.5px;
+              border-radius: 9px; background: rgba(255,178,36,.08); border: 1px solid rgba(255,178,36,.2);
+              color: #ffd486; }
+  .notes li::before { content: "⚠"; }
+
+  .actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 16px; }
+  .counts { color: var(--dim); font-size: 12.5px; margin-right: auto; }
+  .counts b { color: var(--text); }
+
+  #progress { height: 5px; border-radius: 3px; background: var(--panel-2); overflow: hidden;
+              margin-top: 14px; display: none; }
+  #progress i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--violet));
+                transition: width .18s; }
+
+  .result { margin-top: 14px; padding: 14px 16px; border-radius: 12px; font-size: 13.5px; display: none; }
+  .result.ok { background: rgba(53,208,127,.1); border: 1px solid rgba(53,208,127,.28); }
+  .result.err { background: rgba(255,92,87,.1); border: 1px solid rgba(255,92,87,.3); }
+  .result .big { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .result a { color: var(--accent); font-weight: 600; }
+  .result .steps { color: var(--dim); font-size: 12px; margin-top: 7px; }
+
+  details { margin-top: 14px; }
+  summary { cursor: pointer; color: var(--faint); font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; }
+  pre { background: #0a0e16; border: 1px solid var(--line); border-radius: 10px; padding: 12px;
+        overflow-x: auto; font-size: 11.5px; color: #9fd0ff; margin: 9px 0 0; }
+  .hidden { display: none !important; }
+  a.plain { color: var(--dim); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <div class="logo">🌀</div>
+    <div>
+      <h1>Εισαγωγή CSV</h1>
+      <p class="sub">διάλεξε τι θα γίνει μέτρηση — το σύστημα κάνει τα υπόλοιπα</p>
+    </div>
+  </div>
+  <a class="plain" href="/dashboard">dashboard →</a>
+  <a class="plain" href="http://localhost:8085/">αναλύσεις →</a>
+</header>
+
+<main>
+  <section class="card">
+    <h2><span class="n">1</span> Το αρχείο</h2>
+    <p class="hint">Ανεβαίνουν πρώτα μόνο τα πρώτα 256 KB, όσα χρειάζονται για να δούμε τι έχει μέσα.</p>
+    <div id="drop">
+      <div class="big">📄</div>
+      <div class="t">Σύρε εδώ ένα CSV ή κάνε κλικ</div>
+      <div class="s">, ; tab | · με ή χωρίς εισαγωγικά · UTF-8</div>
+    </div>
+    <input type="file" id="file" accept=".csv,.tsv,.txt,text/csv">
+    <div style="margin-top:11px"><button class="btn" id="sample">Δες το με παράδειγμα</button></div>
+  </section>
+
+  <section class="card hidden" id="step2">
+    <h2><span class="n">2</span> Οι στήλες</h2>
+    <p class="hint" id="step2hint"></p>
+    <div class="tablewrap"><table>
+      <thead><tr>
+        <th>Στήλη</th><th>Τύπος</th><th>Ρόλος</th><th>Όνομα στο Protobuf</th>
+        <th>Κάλυψη</th><th>Διαφορετικές</th><th>Εύρος</th><th>Δείγματα</th>
+      </tr></thead>
+      <tbody id="cols"></tbody>
+    </table></div>
+    <ul class="notes" id="notes"></ul>
+  </section>
+
+  <section class="card hidden" id="step3">
+    <h2><span class="n">3</span> Πού πάνε</h2>
+    <p class="hint">Το topic πρέπει να αρχίζει από <code>ingest.</code> για να το διαβάσει ο consumer.</p>
+    <div class="settings">
+      <label class="f">sourceId<input type="text" id="sourceId"></label>
+      <label class="f" style="grid-column: span 2">topic<input type="text" id="topic"></label>
+      <label class="f">partitions<input type="number" id="partitions" min="1" max="50"></label>
+      <label class="f">διαχωριστικό
+        <select id="delimiter"><option value=",">, κόμμα</option><option value=";">; ερωτηματικό</option>
+          <option value="\t">tab</option><option value="|">| κάθετη</option></select></label>
+      <label class="f">δεκαδικό
+        <select id="decimal"><option value=".">. τελεία</option><option value=",">, κόμμα</option></select></label>
+      <label class="f">επικεφαλίδες
+        <select id="hasHeader"><option value="true">ναι</option><option value="false">όχι</option></select></label>
+      <label class="f">μορφή χρόνου
+        <input type="text" id="timeFormat" placeholder="αυτόματα"></label>
+      <label class="f">ωμό payload
+        <select id="rawPayload"><option value="false">όχι (μισά bytes)</option><option value="true">ναι</option></select></label>
+    </div>
+
+    <div class="actions">
+      <div class="counts" id="counts"></div>
+      <button class="btn" id="reset">Άλλο αρχείο</button>
+      <button class="btn primary" id="go">Εισαγωγή στο Kafka →</button>
+    </div>
+    <div id="progress"><i></i></div>
+    <div class="result" id="result"></div>
+
+    <details>
+      <summary>Το request που θα φύγει</summary>
+      <pre id="planjson"></pre>
+    </details>
+  </section>
+</main>
+
+<script>
+'use strict';
+// Το κεφάλι του αρχείου φτάνει για την επιθεώρηση: ένα CSV 2 GB δεν ανεβαίνει δύο φορές.
+const HEAD_BYTES = 256 * 1024;
+const $ = id => document.getElementById(id);
+
+let chosenFile = null;
+let profile = null;
+
+/* ---------------------------------------------------------------- επιλογή αρχείου */
+$('drop').onclick = () => $('file').click();
+$('file').onchange = e => e.target.files[0] && load(e.target.files[0]);
+['dragenter', 'dragover'].forEach(ev => $('drop').addEventListener(ev, e => {
+  e.preventDefault(); $('drop').classList.add('over');
+}));
+['dragleave', 'drop'].forEach(ev => $('drop').addEventListener(ev, e => {
+  e.preventDefault(); $('drop').classList.remove('over');
+}));
+$('drop').addEventListener('drop', e => {
+  const f = e.dataTransfer.files[0];
+  if (f) load(f);
+});
+
+/* Ένα μικρό παράδειγμα με όλες τις παγίδες μέσα: ελληνικές επικεφαλίδες, διαχωριστικό «;»,
+   δεκαδικό κόμμα, κείμενο σε εισαγωγικά που περιέχει κόμμα, και κενή τιμή. */
+const SAMPLE = 'ημερομηνία;σταθμός;θερμοκρασία;υγρασία;άνεμος;βροχή;σημείωση\n'
+  + ['2026-09-01 08:00:00;ΑΘΗΝΑ;21,4;58,2;12,5;0;',
+     '2026-09-01 08:00:00;ΠΑΤΡΑ;19,8;66,0;18,1;1,2;"βροχή, ασθενής"',
+     '2026-09-01 09:00:00;ΑΘΗΝΑ;23,1;55,7;11,0;0;',
+     '2026-09-01 09:00:00;ΠΑΤΡΑ;20,3;64,8;21,7;2,4;"βροχή, δυνατή"',
+     '2026-09-01 10:00:00;ΑΘΗΝΑ;25,6;51,3;9,8;0;',
+     '2026-09-01 10:00:00;ΠΑΤΡΑ;21,9;62,1;19,4;0,3;',
+     '2026-09-01 11:00:00;ΑΘΗΝΑ;27,2;48,9;10,4;0;',
+     '2026-09-01 11:00:00;ΠΑΤΡΑ;23,0;60,5;17,2;NA;'].join('\n') + '\n';
+
+$('sample').onclick = () => load(new File([SAMPLE], 'weather-demo.csv', {type: 'text/csv'}));
+if (location.hash === '#demo') {
+  $('sample').click();
+}
+
+async function load(file) {
+  chosenFile = file;
+  $('drop').querySelector('.t').textContent = file.name;
+  $('drop').querySelector('.s').textContent = (file.size / 1048576).toFixed(2) + ' MB — διαβάζω το κεφάλι…';
+  try {
+    const head = file.slice(0, HEAD_BYTES);
+    const res = await fetch('/api/v1/csv/inspect?name=' + encodeURIComponent(file.name), {
+      method: 'POST', headers: {'Content-Type': 'text/csv'}, body: head
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.status);
+    profile = body;
+    render();
+  } catch (err) {
+    $('drop').querySelector('.s').textContent = 'Σφάλμα: ' + err.message;
+  }
+}
+
+/* ------------------------------------------------------------------- εμφάνιση */
+const ROLES = [
+  ['metric', 'μέτρηση'], ['label', 'ετικέτα'], ['time', 'χρόνος'], ['key', 'κλειδί'], ['skip', 'παράλειψη']
+];
+const TYPES = [['number', 'number'], ['text', 'text'], ['bool', 'bool'], ['timestamp', 'timestamp']];
+
+function render() {
+  const p = profile, s = p.suggestion;
+  $('step2').classList.remove('hidden');
+  $('step3').classList.remove('hidden');
+  $('drop').querySelector('.s').textContent =
+    (chosenFile.size / 1048576).toFixed(2) + ' MB · ' + p.columns.length + ' στήλες · δείγμα ' + p.rowsSampled + ' γραμμών';
+  $('step2hint').textContent = 'Οι προεπιλογές βγήκαν από τα δεδομένα. «Μέτρηση» σημαίνει '
+    + 'ότι η στήλη μπαίνει στη χρονοσειρά και στην ανάλυση· «ετικέτα» ότι αποθηκεύεται ως κείμενο.';
+
+  $('cols').innerHTML = '';
+  p.columns.forEach(c => $('cols').appendChild(row(c)));
+
+  $('sourceId').value = s.sourceId || '';
+  $('topic').value = s.topic || '';
+  $('partitions').value = s.partitions || 6;
+  $('delimiter').value = p.delimiter === '\\t' ? '\t' : p.delimiter;
+  $('decimal').value = s.decimal || '.';
+  $('hasHeader').value = String(p.hasHeader);
+  $('timeFormat').value = s.timeFormat || '';
+
+  $('notes').innerHTML = '';
+  (p.notes || []).forEach(n => {
+    const li = document.createElement('li');
+    li.appendChild(document.createTextNode(n));
+    $('notes').appendChild(li);
+  });
+
+  $('result').style.display = 'none';
+  refresh();
+}
+
+function row(c) {
+  const tr = document.createElement('tr');
+  tr.dataset.name = c.name;
+
+  const name = document.createElement('td');
+  name.className = 'name';
+  name.textContent = c.name;
+  tr.appendChild(name);
+
+  const type = document.createElement('td');
+  type.appendChild(select('type', TYPES, c.type));
+  tr.appendChild(type);
+
+  const role = document.createElement('td');
+  role.appendChild(select('role', ROLES, c.role));
+  tr.appendChild(role);
+
+  const as = document.createElement('td');
+  const asInput = document.createElement('input');
+  asInput.type = 'text';
+  asInput.className = 'as';
+  asInput.value = c.name;
+  asInput.size = 12;
+  asInput.oninput = refresh;
+  as.appendChild(asInput);
+  tr.appendChild(as);
+
+  const total = c.present + c.missing;
+  const pct = total ? Math.round(100 * c.present / total) : 0;
+  const cov = document.createElement('td');
+  cov.className = 'cover';
+  cov.innerHTML = '<span class="bar"><i class="' + (pct === 100 ? '' : pct > 0 ? 'part' : 'none')
+    + '" style="width:' + pct + '%"></i></span><span>' + pct + '%</span>';
+  tr.appendChild(cov);
+
+  const dist = document.createElement('td');
+  dist.className = 'range';
+  dist.textContent = c.distinct;
+  tr.appendChild(dist);
+
+  const range = document.createElement('td');
+  range.className = 'range';
+  range.textContent = c.min !== null && c.min !== undefined ? fmt(c.min) + ' … ' + fmt(c.max) : '—';
+  tr.appendChild(range);
+
+  const samples = document.createElement('td');
+  samples.className = 'samples';
+  samples.textContent = (c.samples || []).join(' · ') || '—';
+  samples.title = samples.textContent;
+  tr.appendChild(samples);
+  return tr;
+}
+
+function select(cls, options, value) {
+  const el = document.createElement('select');
+  el.className = cls;
+  options.forEach(([v, label]) => {
+    const o = document.createElement('option');
+    o.value = v;
+    o.textContent = label;
+    if (v === value) o.selected = true;
+    el.appendChild(o);
+  });
+  el.onchange = () => { syncExclusive(el, cls); refresh(); };
+  return el;
+}
+
+/** Χρόνος και κλειδί είναι μοναδικά: δύο στήλες «χρόνος» δεν βγάζουν νόημα. */
+function syncExclusive(changed, cls) {
+  if (cls !== 'role' || (changed.value !== 'time' && changed.value !== 'key')) return;
+  document.querySelectorAll('#cols select.role').forEach(el => {
+    if (el !== changed && el.value === changed.value) el.value = 'label';
+  });
+}
+
+// Ελληνικό locale και εδώ: θα ήταν παράξενο να δείχνουμε «19.80» ακριβώς δίπλα στο δείγμα «19,8».
+const fmt = v => v.toLocaleString('el', {maximumFractionDigits: 2});
+
+/* --------------------------------------------------------------------- plan */
+function buildPlan() {
+  const columns = [];
+  let timeColumn = null, keyColumn = null;
+  document.querySelectorAll('#cols tr').forEach(tr => {
+    const role = tr.querySelector('select.role').value;
+    const type = tr.querySelector('select.type').value;
+    const as = tr.querySelector('input.as').value.trim() || tr.dataset.name;
+    tr.classList.toggle('off', role === 'skip' || role === 'time');
+    if (role === 'time') { timeColumn = tr.dataset.name; return; }
+    if (role === 'skip') return;
+    if (role === 'key') keyColumn = tr.dataset.name;
+    columns.push({name: tr.dataset.name, as: as, type: role === 'metric' ? 'number' : type});
+  });
+  return {
+    sourceId: $('sourceId').value.trim(),
+    topic: $('topic').value.trim(),
+    createTopicIfMissing: true,
+    partitions: Number($('partitions').value) || 6,
+    delimiter: $('delimiter').value,
+    decimal: $('decimal').value,
+    hasHeader: $('hasHeader').value === 'true',
+    timeColumn: timeColumn,
+    timeFormat: $('timeFormat').value.trim() || null,
+    keyColumn: keyColumn,
+    columns: columns,
+    rawPayload: $('rawPayload').value === 'true'
+  };
+}
+
+function refresh() {
+  const plan = buildPlan();
+  $('planjson').textContent = JSON.stringify(plan, null, 2);
+  const metrics = plan.columns.filter(c => c.type === 'number').length;
+  $('counts').innerHTML = '<b>' + plan.columns.length + '</b> πεδία, από τα οποία <b>' + metrics
+    + '</b> μετρήσεις' + (plan.timeColumn ? ' · χρόνος: <b>' + plan.timeColumn + '</b>' : ' · <b>χωρίς χρόνο</b>')
+    + (plan.keyColumn ? ' · κλειδί: <b>' + plan.keyColumn + '</b>' : '');
+  $('go').disabled = plan.columns.length === 0 || !plan.topic;
+}
+
+/* ------------------------------------------------------------------ εισαγωγή */
+$('reset').onclick = () => {
+  chosenFile = null; profile = null;
+  $('file').value = '';
+  $('step2').classList.add('hidden');
+  $('step3').classList.add('hidden');
+  $('drop').querySelector('.t').textContent = 'Σύρε εδώ ένα CSV ή κάνε κλικ';
+  $('drop').querySelector('.s').textContent = ', ; tab | · με ή χωρίς εισαγωγικά · UTF-8';
+};
+
+$('go').onclick = () => {
+  const plan = buildPlan();
+  const form = new FormData();
+  form.append('file', chosenFile, chosenFile.name);
+  form.append('plan', new Blob([JSON.stringify(plan)], {type: 'application/json'}));
+
+  const bar = $('progress');
+  bar.style.display = 'block';
+  bar.querySelector('i').style.width = '0';
+  $('go').disabled = true;
+  $('result').style.display = 'none';
+
+  const started = performance.now();
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/v1/csv/ingest');
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) bar.querySelector('i').style.width = (100 * e.loaded / e.total) + '%';
+  };
+  xhr.onload = () => {
+    bar.querySelector('i').style.width = '100%';
+    $('go').disabled = false;
+    const secs = (performance.now() - started) / 1000;
+    let body;
+    try { body = JSON.parse(xhr.responseText); } catch (e) { body = {error: xhr.responseText}; }
+    show(xhr.status, body, secs, plan);
+  };
+  xhr.onerror = () => {
+    $('go').disabled = false;
+    show(0, {error: 'Το ingestion-service δεν απάντησε.'}, 0, plan);
+  };
+  xhr.send(form);
+};
+
+function show(status, body, secs, plan) {
+  const box = $('result');
+  box.style.display = 'block';
+  if (status >= 200 && status < 300 && body.accepted !== undefined) {
+    box.className = 'result ok';
+    const rate = secs > 0 ? Math.round(body.accepted / secs).toLocaleString('el') : '—';
+    box.innerHTML = '<div class="big">' + body.accepted.toLocaleString('el') + ' εγγραφές στο Kafka</div>'
+      + '<div class="steps">' + secs.toFixed(1) + 's · ' + rate + ' εγγρ/s'
+      + (body.skipped ? ' · άκυρες: ' + body.skipped : '')
+      + (body.failed ? ' · απέτυχαν: ' + body.failed : '')
+      + '</div><div class="steps">Ο consumer τις γράφει στη βάση σε δευτερόλεπτα. '
+      + '<a href="http://localhost:8085/?source=' + encodeURIComponent(plan.sourceId) + '" target="_blank">'
+      + 'Δες την ανάλυση →</a></div>';
+  } else {
+    box.className = 'result err';
+    box.innerHTML = '<div><b>Δεν έγινε η εισαγωγή.</b></div><div class="steps">'
+      + (body.error || ('HTTP ' + status)) + '</div>';
+  }
+}
+</script>
+</body>
+</html>

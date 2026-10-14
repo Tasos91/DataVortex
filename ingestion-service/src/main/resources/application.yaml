@@ -7,6 +7,15 @@
     application:
       name: data-vortex
 
+    # Ανέβασμα CSV: τα defaults του Spring είναι 1MB αρχείο / 10MB request, δηλαδή σχεδόν κάθε
+    # αληθινό CSV θα απορριπτόταν. Το αρχείο διαβάζεται σε ροή και πάνω από το threshold ζει στον
+    # δίσκο, όχι στη μνήμη, άρα το μεγάλο όριο δεν κινδυνεύει να ρίξει τη διεργασία.
+    servlet:
+      multipart:
+        max-file-size: ${MAX_UPLOAD_FILE_SIZE:2GB}
+        max-request-size: ${MAX_UPLOAD_REQUEST_SIZE:2GB}
+        file-size-threshold: 256KB
+
     # ----------------------------------------------------
     # 1. Βάση Δεδομένων (PostgreSQL)
     # ----------------------------------------------------
@@ -57,7 +66,10 @@
               fetch.min.bytes: ${KAFKA_FETCH_MIN_BYTES:65536}
               fetch.max.wait.ms: ${KAFKA_FETCH_MAX_WAIT_MS:500}
               max.poll.records: ${KAFKA_MAX_POLL_RECORDS:500}   # μέγεθος batch ανά poll
-              metadata.max.age.ms: ${KAFKA_METADATA_MAX_AGE_MS:30000} # πόσο γρήγορα βρίσκει νέα topics
+              # Πόσο γρήγορα ο consumer ανακαλύπτει νέα topics του pattern. Από 30s σε 5s: μέχρι την
+              # ανακάλυψη, ο παραγωγός περιμένει (δες KafkaTopicService.awaitConsumerAssignment),
+              # άρα τα 30s ήταν 30s καθυστέρηση στην πρώτη εισαγωγή κάθε νέας πηγής.
+              metadata.max.age.ms: ${KAFKA_METADATA_MAX_AGE_MS:5000}
 
           bindings:
             consumeData-in-0:

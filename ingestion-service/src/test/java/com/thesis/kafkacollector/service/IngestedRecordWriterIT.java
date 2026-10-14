@@ -38,6 +38,7 @@ class IngestedRecordWriterIT {
 
     private static JdbcTemplate jdbc;
     private static IngestedRecordWriter writer;
+    private static AggregateRefresher refresher;
 
     @BeforeAll
     static void migrateAndWire() {
@@ -46,12 +47,20 @@ class IngestedRecordWriterIT {
                 DB.getJdbcUrl() + "?reWriteBatchedInserts=true", DB.getUsername(), DB.getPassword());
         Flyway.configure().dataSource(dataSource).locations("classpath:db/migration").load().migrate();
         jdbc = new JdbcTemplate(dataSource);
-        writer = new IngestedRecordWriter(jdbc, new SimpleMeterRegistry());
+        refresher = new AggregateRefresher(jdbc, new SimpleMeterRegistry());
+        // Τα @Value δεν εφαρμόζονται χωρίς Spring context: τα ορίζουμε όπως στην παραγωγή.
+        org.springframework.test.util.ReflectionTestUtils.setField(refresher, "backfillThresholdMs", 7_200_000L);
+        org.springframework.test.util.ReflectionTestUtils.setField(refresher, "enabled", true);
+        org.springframework.test.util.ReflectionTestUtils.setField(refresher, "quietMs", 0L);
+        writer = new IngestedRecordWriter(jdbc, refresher, new SimpleMeterRegistry());
     }
 
     @BeforeEach
     void clean() {
         jdbc.execute("TRUNCATE ingested_records, metric_points, field_catalog");
+        // Ο refresher είναι κοινός για όλη την κλάση και ο helper row() γράφει με χρόνο αρκετά
+        // παλιό ώστε να θεωρείται backfill: χωρίς αυτό, κάθε test κληρονομεί το εύρος του προηγούμενου.
+        refresher.discardPending();
     }
 
     private static IngestedRecordWriter.Row row(long offset, String fields) {
@@ -145,6 +154,59 @@ class IngestedRecordWriterIT {
         assertEquals(2500, writer.write(rows));
         assertEquals(2500, count("ingested_records"));
         assertEquals(5000, count("metric_points"), "δύο αριθμητικά πεδία ανά γραμμή");
+    }
+
+    @Test
+    void historicalDataIsInvisibleUntilTheAggregatesAreRefreshed() {
+        // Το bug: οι πολιτικές refresh καλύπτουν ένα παράθυρο γύρω από το τώρα (3 ώρες για το 1m).
+        // Ένα CSV με δεδομένα του περασμένου μήνα έμπαινε στη βάση και τα ερωτήματα γύρναγαν ΑΔΕΙΑ,
+        // χωρίς κανένα σφάλμα πουθενά — η χειρότερη κατηγορία σφάλματος.
+        // Πρώτα ανεβάζουμε το watermark με ένα refresh του «τώρα», όπως κάνει η πολιτική σε
+        // παραγωγή. Χωρίς αυτό το βήμα το watermark είναι -infinity, το real-time σκέλος δείχνει
+        // τα πάντα, και το bug δεν φαίνεται καθόλου στο test.
+        long now = System.currentTimeMillis();
+        writer.write(List.of(new IngestedRecordWriter.Row(now, "ingest.it", 0, 1,
+                "warm-src", "{\"Speed\":1.0}", null)));
+        long day = 86_400_000L;
+        jdbc.update("CALL refresh_continuous_aggregate('metric_1m', ?::timestamptz, ?::timestamptz)",
+                new java.sql.Timestamp(Math.floorDiv(now, day) * day),
+                new java.sql.Timestamp((Math.floorDiv(now, day) + 1) * day));
+
+        long old = Instant.parse("2026-08-01T10:00:00Z").toEpochMilli();
+        List<IngestedRecordWriter.Row> rows = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            rows.add(new IngestedRecordWriter.Row(old + i * 60_000L, "ingest.it", 0, 1000 + i,
+                    "old-src", "{\"Speed\":" + (i + 1) + "}", null));
+        }
+        assertEquals(10, writer.write(rows));
+        assertEquals(11, count("metric_points"), "τα ωμά σημεία είναι εκεί (10 παλιά + 1 φρέσκο)");
+
+        assertTrue(refresher.hasPending(), "ο writer πρέπει να έχει δηλώσει το παλιό εύρος");
+        assertEquals(0, materialized1m("old-src"),
+                "πριν το refresh το συγκεντρωτικό είναι άδειο — αυτό ήταν το αόρατο bug");
+
+        refresher.refreshIfDirty();
+
+        assertEquals(10L, materialized1m("old-src"), "μετά το refresh τα δεδομένα υπάρχουν");
+        assertFalse(refresher.hasPending(), "το εύρος καταναλώθηκε");
+    }
+
+    @Test
+    void liveDataNeedsNoRefreshAtAll() {
+        // Φρέσκα δεδομένα: η πολιτική και το real-time aggregation τα καλύπτουν, άρα δεν έχει
+        // νόημα να πληρώνουμε ένα refresh ανά batch.
+        writer.write(List.of(new IngestedRecordWriter.Row(System.currentTimeMillis(),
+                "ingest.it", 0, 1, "live-src", "{\"Speed\":1.0}", null)));
+
+        assertFalse(refresher.hasPending());
+    }
+
+    /** Μόνο το υλοποιημένο κομμάτι του CAGG, χωρίς το real-time σκέλος. */
+    private static long materialized1m(String source) {
+        Long n = jdbc.queryForObject("""
+                SELECT coalesce(sum(n), 0) FROM metric_1m
+                WHERE source_id = ? AND field = 'Speed'""", Long.class, source);
+        return n == null ? 0 : n;
     }
 
     private static int count(String table) {

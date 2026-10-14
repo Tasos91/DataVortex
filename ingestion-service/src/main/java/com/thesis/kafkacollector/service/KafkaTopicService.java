@@ -2,6 +2,7 @@ package com.thesis.kafkacollector.service;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.config.TopicBuilder;
@@ -10,6 +11,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 /**
@@ -28,6 +30,8 @@ public class KafkaTopicService {
     private static final Logger log = LoggerFactory.getLogger(KafkaTopicService.class);
 
     private final KafkaAdmin kafkaAdmin;
+    /** Φτιάχνεται μόνο όταν χρειαστεί (δημιουργία νέου topic) και κλείνει στο shutdown. */
+    private volatile AdminClient adminClient;
     private final Map<String, Long> knownTopics = new ConcurrentHashMap<>();
 
     /** Πόσο κρατάει η cache ενός topic που βρέθηκε (ms). */
@@ -49,8 +53,31 @@ public class KafkaTopicService {
     @Value("${spring.kafka.topic.dlq:dlq.ingest}")
     private String dlqTopic;
 
+    /** Το topic όταν το request δεν ορίζει δικό του. */
+    @Value("${spring.kafka.topic.ingestion:ingest.default}")
+    private String defaultTopic;
+
+    /** Ο group του consumer· χρειάζεται για να ελεγχθεί ότι ανέλαβε το νέο topic. */
+    @Value("${spring.cloud.stream.bindings.consumeData-in-0.group:}")
+    private String consumerGroup;
+
+    /** Πόσο περιμένουμε την ανάθεση ενός νέου topic στον consumer, πριν στείλουμε. */
+    @Value("${datavortex.assignment-wait-ms:30000}")
+    private long assignmentWaitMs;
+
     public KafkaTopicService(KafkaAdmin kafkaAdmin) {
         this.kafkaAdmin = kafkaAdmin;
+    }
+
+    /**
+     * Το topic του request (ή το default) αφού επιβεβαιωθεί ότι μπορεί να χρησιμοποιηθεί.
+     * Ο έλεγχος γίνεται ΠΡΙΝ σταλεί το πρώτο μήνυμα, ώστε ένα λάθος όνομα να γίνεται αμέσως 400
+     * και να μη κολλάει ο producer περιμένοντας metadata που δεν θα έρθουν ποτέ.
+     */
+    public String resolve(String requested, boolean createIfMissing, Integer partitions) {
+        String topic = requested != null && !requested.isBlank() ? requested.strip() : defaultTopic;
+        ensureUsable(topic, createIfMissing, partitions);
+        return topic;
     }
 
     /**
@@ -85,6 +112,94 @@ public class KafkaTopicService {
                 .build());
         knownTopics.put(topic, System.currentTimeMillis());
         log.info("Δημιουργήθηκε το topic '{}' με {} partitions.", topic, wanted);
+        awaitConsumerAssignment(topic);
+    }
+
+    /**
+     * Περιμένει ο consumer group να αναθέσει το <b>νέο</b> topic, πριν σταλεί το πρώτο μήνυμα.
+     * <p>
+     * <b>ΜΗΝ ΤΟ ΑΦΑΙΡΕΣΕΙΣ.</b> Χωρίς αυτό υπήρχε σιωπηλή απώλεια δεδομένων, μετρημένη: ο consumer
+     * ακούει σε <i>pattern</i> και ανακαλύπτει νέα topics μόνο στο επόμενο metadata refresh. Μέχρι
+     * τότε τα μηνύματα φεύγουν κανονικά, ο client παίρνει <b>200 «960 από 960 εγγραφές»</b>, και όταν
+     * ο consumer τελικά αναθέσει τα partitions ξεκινά από το <b>τέλος</b> τους: τα 960 δεν
+     * διαβάζονται ποτέ, δεν πάνε ούτε στο DLQ, και κανένα σφάλμα δεν εμφανίζεται πουθενά.
+     * <p>
+     * Κοστίζει μόνο στην πρώτη εισαγωγή κάθε νέου topic — μετά, το topic υπάρχει και ο δρόμος αυτός
+     * δεν εκτελείται καθόλου. Αν ο consumer δεν προλάβει μέσα στο χρονικό όριο, προχωράμε με ρητή
+     * προειδοποίηση: καλύτερα να σταλούν τα δεδομένα παρά να μπλοκάρει η εισαγωγή για πάντα (μπορεί
+     * ο consumer να τρέχει αλλού ή να είναι σβηστός).
+     */
+    private void awaitConsumerAssignment(String topic) {
+        if (assignmentWaitMs <= 0 || consumerGroup == null || consumerGroup.isBlank()) {
+            return;
+        }
+        long deadline = System.currentTimeMillis() + assignmentWaitMs;
+        long started = System.nanoTime();
+        while (System.currentTimeMillis() < deadline) {
+            if (isAssigned(topic)) {
+                log.info("Ο consumer ανέλαβε το '{}' σε {} ms· η αποστολή μπορεί να ξεκινήσει.",
+                        topic, (System.nanoTime() - started) / 1_000_000);
+                return;
+            }
+            try {
+                Thread.sleep(250);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        log.warn("Ο consumer group '{}' δεν ανέλαβε το topic '{}' σε {} ms. Τα μηνύματα θα σταλούν, "
+                        + "αλλά όσα φτάσουν πριν την ανάθεση μπορεί να μη διαβαστούν ποτέ.",
+                consumerGroup, topic, assignmentWaitMs);
+    }
+
+    /**
+     * Έχει κάποιο μέλος του group ανατεθειμένο έστω ένα partition αυτού του topic;
+     * <p>
+     * Ο AdminClient φτιάχνεται τεμπέλικα και κρατιέται: η διαδρομή αυτή εκτελείται μόνο όταν
+     * δημιουργείται νέο topic, αλλά τότε καλείται κάθε 250 ms.
+     */
+    private boolean isAssigned(String topic) {
+        try {
+            var description = admin().describeConsumerGroups(java.util.List.of(consumerGroup))
+                    .all().get(5, TimeUnit.SECONDS).get(consumerGroup);
+            if (description == null) {
+                return false;
+            }
+            for (var member : description.members()) {
+                for (var tp : member.assignment().topicPartitions()) {
+                    if (topic.equals(tp.topic())) {
+                        return true;
+                    }
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            log.debug("Ο έλεγχος ανάθεσης για το '{}' απέτυχε: {}", topic, e.getMessage());
+        }
+        return false;
+    }
+
+    private AdminClient admin() {
+        AdminClient existing = adminClient;
+        if (existing == null) {
+            synchronized (this) {
+                if (adminClient == null) {
+                    adminClient = AdminClient.create(kafkaAdmin.getConfigurationProperties());
+                }
+                existing = adminClient;
+            }
+        }
+        return existing;
+    }
+
+    @jakarta.annotation.PreDestroy
+    public void closeAdmin() {
+        AdminClient existing = adminClient;
+        if (existing != null) {
+            existing.close(java.time.Duration.ofSeconds(2));
+        }
     }
 
     /**

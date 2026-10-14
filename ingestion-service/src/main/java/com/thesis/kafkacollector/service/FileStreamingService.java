@@ -2,15 +2,13 @@ package com.thesis.kafkacollector.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.thesis.kafkacollector.csv.CsvInspector;
+import com.thesis.kafkacollector.csv.CsvPlan;
 import com.thesis.kafkacollector.dto.IngestionRequest;
 import com.thesis.kafkacollector.mapping.RecordMapper;
 import com.thesis.kafkacollector.proto.IngestedRecordProto;
-import io.micrometer.core.instrument.Counter;
-import io.micrometer.core.instrument.MeterRegistry;
-import io.micrometer.core.instrument.Timer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
@@ -20,7 +18,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -32,70 +30,77 @@ public class FileStreamingService {
     // Το KafkaProtobufSerializer γράφει το schema στο Schema Registry και στέλνει το record με το schema id
     private final KafkaTemplate<String, IngestedRecordProto.IngestedRecord> kafkaTemplate;
     private final KafkaTopicService topicService;
-    private final MeterRegistry registry;
+    private final CsvIngestService csvService;
+    private final IngestMeters meters;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    // Το topic που χρησιμοποιείται όταν το request δεν ορίζει δικό του
-    @Value("${spring.kafka.topic.ingestion:ais-data}")
-    private String defaultTopic;
-
     public FileStreamingService(KafkaTemplate<String, IngestedRecordProto.IngestedRecord> kafkaTemplate,
-                                KafkaTopicService topicService, MeterRegistry registry) {
+                                KafkaTopicService topicService, CsvIngestService csvService,
+                                IngestMeters meters) {
         this.kafkaTemplate = kafkaTemplate;
         this.topicService = topicService;
-        this.registry = registry;
+        this.csvService = csvService;
+        this.meters = meters;
     }
 
     /**
-     * Το αποτέλεσμα μιας εισαγωγής. Το {@code accepted} είναι όσα επιβεβαίωσε το Kafka
-     * (μετά από flush), όχι όσα μπήκαν στην ουρά του producer.
-     *
-     * @param read     πόσες εγγραφές διαβάστηκαν από την είσοδο
-     * @param accepted πόσες επιβεβαιώθηκαν από το Kafka
-     * @param skipped  πόσες ήταν άκυρες και προσπεράστηκαν
+     * CSV από αρχείο, με την παλιά μορφή request ({@code fileType: "CSV"} + {@code fieldMappings}).
+     * <p>
+     * Μένει για συμβατότητα, αλλά <b>δεν</b> διαβάζει πια μόνο του: μεταφράζει το request σε
+     * {@link CsvPlan} και δουλεύει το {@link CsvIngestService}. Έτσι κερδίζει και αυτή η διαδρομή
+     * τον σωστό parser (εισαγωγικά, CRLF, BOM) και τους <b>τύπους</b>: πριν, κάθε στήλη πήγαινε ως
+     * κείμενο και κανένα CSV δεν παρήγαγε ποτέ μετρική.
+     * <p>
+     * Οι τύποι δεν δηλώνονται εδώ, άρα μαντεύονται από τα δεδομένα — γι' αυτό το
+     * {@code /api/v1/csv/inspect} + {@code /ingest} είναι ο σωστός δρόμος: εκεί τους λέει ο χρήστης.
      */
-    public record IngestResult(int read, int accepted, int skipped) {
-        public int failed() {
-            return read - skipped - accepted;
+    public IngestResult processCsvStream(IngestionRequest request) throws Exception {
+        java.nio.file.Path file = Paths.get(request.getFilePath());
+        String sample;
+        try (var in = Files.newInputStream(file)) {
+            sample = new String(in.readNBytes(256 * 1024), StandardCharsets.UTF_8);
+        }
+        CsvInspector.Profile profile = CsvInspector.inspect(sample, file.getFileName().toString());
+
+        // Αν ο χρήστης έδωσε fieldMappings, σέβονται απόλυτα: κρατάμε μόνο αυτές τις στήλες, με τα
+        // ονόματα που ζήτησε. Ο τύπος κάθε στήλης έρχεται από την επιθεώρηση του αρχείου.
+        List<CsvPlan.Column> columns = new java.util.ArrayList<>();
+        Map<String, String> mappings = request.getFieldMappings();
+        if (mappings == null || mappings.isEmpty()) {
+            columns.addAll(profile.suggestion().columns());
+        } else {
+            for (Map.Entry<String, String> e : mappings.entrySet()) {
+                String column = stripPath(e.getValue());
+                columns.add(new CsvPlan.Column(column, e.getKey(), typeOf(profile, column)));
+            }
+        }
+        CsvPlan plan = new CsvPlan(request.getSourceId(), request.getTopic(),
+                request.isCreateTopicIfMissing(), request.getPartitions(),
+                profile.delimiter(), profile.suggestion().decimal(), profile.hasHeader(),
+                stripPath(request.getTimeField()), null, stripPath(request.getKeyField()),
+                columns, true);
+
+        try (var reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+            return csvService.ingest(reader, plan);
         }
     }
 
-    public IngestResult processCsvStream(IngestionRequest request) throws Exception {
-        Map<String, String> mappings = request.getFieldMappings();
-        String topic = resolveTopic(request);
-        AtomicInteger failed = new AtomicInteger();
-        int read = 0;
-        int skipped = 0;
+    /** Το {@code "$.col"} ή {@code "col"} του παλιού request είναι όνομα στήλης στο CSV. */
+    private static String stripPath(String path) {
+        if (path == null || path.isBlank()) {
+            return null;
+        }
+        String p = path.strip();
+        return p.startsWith("$.") ? p.substring(2) : p;
+    }
 
-        try (BufferedReader br = Files.newBufferedReader(Paths.get(request.getFilePath()), StandardCharsets.UTF_8)) {
-            String headerLine = br.readLine();
-            if (headerLine == null) {
-                return new IngestResult(0, 0, 0);
-            }
-
-            String[] headers = headerLine.split(",");
-            String line;
-
-            while ((line = br.readLine()) != null) {
-                // ΕΣΩΤΕΡΙΚΟ TRY-CATCH: Για να μη σταματήσει το loop αν μια γραμμή είναι "χαλασμένη"
-                try {
-                    String[] values = line.split(",");
-                    Map<String, Object> rawJsonMap = new HashMap<>();
-
-                    for (int i = 0; i < headers.length && i < values.length; i++) {
-                        rawJsonMap.put(headers[i].trim(), values[i].trim());
-                    }
-
-                    send(topic, request, objectMapper.valueToTree(rawJsonMap), mappings, failed);
-                    read++;
-
-                } catch (Exception e) {
-                    skipped++;
-                    log.warn("Σφάλμα κατά την επεξεργασία της γραμμής CSV: {}. Αιτία: {}", line, e.getMessage());
-                }
+    private static String typeOf(CsvInspector.Profile profile, String column) {
+        for (CsvInspector.Column c : profile.columns()) {
+            if (c.name().equals(column)) {
+                return c.type();
             }
         }
-        return finish(topic, "csv", read + skipped, read, skipped, failed);
+        return "text";
     }
 
     /**
@@ -109,7 +114,7 @@ public class FileStreamingService {
     public IngestResult processPayload(IngestionRequest request) throws Exception {
         JsonNode root = objectMapper.valueToTree(request.getPayload());
         Map<String, String> mappings = request.getFieldMappings();
-        String topic = resolveTopic(request);
+        String topic = topicService.resolve(request.getTopic(), request.isCreateTopicIfMissing(), request.getPartitions());
         AtomicInteger failed = new AtomicInteger();
         int read = 0;
 
@@ -122,7 +127,7 @@ public class FileStreamingService {
             send(topic, request, root, mappings, failed);
             read++;
         }
-        return finish(topic, "payload", read, read, 0, failed);
+        return meters.finish(topic, "payload", read, read, 0, failed);
     }
 
     /**
@@ -151,7 +156,7 @@ public class FileStreamingService {
                 }
                 if (config == null) {
                     config = objectMapper.readValue(line, IngestionRequest.class);
-                    topic = resolveTopic(config);
+                    topic = topicService.resolve(config.getTopic(), config.isCreateTopicIfMissing(), config.getPartitions());
                     mappings = config.getFieldMappings();
                     log.info("NDJSON: ξεκινά εισαγωγή στο topic {} (sourceId {})", topic, config.getSourceId());
                     continue;
@@ -169,12 +174,12 @@ public class FileStreamingService {
             throw new IllegalArgumentException("Το σώμα είναι κενό. Η πρώτη γραμμή πρέπει να έχει τις "
                     + "ρυθμίσεις (sourceId, topic, keyField, fieldMappings) και οι επόμενες τις εγγραφές.");
         }
-        return finish(topic, "ndjson", read + skipped, read, skipped, failed);
+        return meters.finish(topic, "ndjson", read + skipped, read, skipped, failed);
     }
 
     public IngestResult processJsonStream(IngestionRequest request) throws Exception {
         Map<String, String> mappings = request.getFieldMappings();
-        String topic = resolveTopic(request);
+        String topic = topicService.resolve(request.getTopic(), request.isCreateTopicIfMissing(), request.getPartitions());
         AtomicInteger failed = new AtomicInteger();
         log.info("Ξεκινάει η επεξεργασία JSON αρχείου: {}", request.getFilePath());
         log.info("Στόχος Kafka Topic: {}", topic);
@@ -208,56 +213,7 @@ public class FileStreamingService {
                 token = parser.nextToken();
             }
         }
-        return finish(topic, "json-file", read + skipped, read, skipped, failed);
-    }
-
-    /**
-     * Περιμένει να επιβεβαιώσει το Kafka ό,τι στάλθηκε, πριν απαντήσουμε στον client.
-     * Χωρίς αυτό η απάντηση έλεγε "στάλθηκαν N" ενώ τα μηνύματα ήταν ακόμα στο buffer του
-     * producer: αν έπεφτε το Kafka, ο client είχε 200 και τα δεδομένα δεν υπήρχαν πουθενά.
-     */
-    private IngestResult finish(String topic, String what, int total, int read, int skipped, AtomicInteger failed) {
-        long started = System.nanoTime();
-        kafkaTemplate.flush();
-        int accepted = read - failed.get();
-        IngestResult result = new IngestResult(total, accepted, skipped);
-
-        Timer.builder("datavortex.ingest.flush").tag("mode", what)
-                .description("Αναμονή για τα acks του Kafka στο τέλος μιας εισαγωγής")
-                .register(registry)
-                .record(System.nanoTime() - started, java.util.concurrent.TimeUnit.NANOSECONDS);
-        count(what, "accepted", accepted);
-        count(what, "failed", result.failed());
-        count(what, "skipped", skipped);
-        if (result.failed() > 0 || skipped > 0) {
-            log.warn("{}: {} εγγραφές, {} στο Kafka, {} απέτυχαν, {} άκυρες (topic {})",
-                    what, total, accepted, result.failed(), skipped, topic);
-        } else {
-            log.info("{}: {} μηνύματα στο topic {}", what, accepted, topic);
-        }
-        return result;
-    }
-
-    private void count(String mode, String result, int amount) {
-        if (amount > 0) {
-            Counter.builder("datavortex.ingest.records")
-                    .description("Εγγραφές που μπήκαν στον σωλήνα, ανά τρόπο εισαγωγής και αποτέλεσμα")
-                    .tags("mode", mode, "result", result)
-                    .register(registry)
-                    .increment(amount);
-        }
-    }
-
-    /**
-     * Το topic του request, ή το default. Ελέγχεται ότι υπάρχει πριν στείλουμε οτιδήποτε,
-     * ώστε ένα λάθος όνομα να γίνεται αμέσως 400 και να μη κολλάει ο producer.
-     */
-    private String resolveTopic(IngestionRequest request) {
-        String topic = (request.getTopic() != null && !request.getTopic().isBlank())
-                ? request.getTopic().trim()
-                : defaultTopic;
-        topicService.ensureUsable(topic, request.isCreateTopicIfMissing(), request.getPartitions());
-        return topic;
+        return meters.finish(topic, "json-file", read + skipped, read, skipped, failed);
     }
 
     /**

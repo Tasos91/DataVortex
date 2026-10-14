@@ -20,16 +20,20 @@ public enum FieldRoles {
 
     // ΠΡΟΣΟΧΗ στη σειρά: κερδίζει ο πρώτος ρόλος που ταιριάζει, άρα οι πιο ειδικοί πάνε πρώτοι.
     // Π.χ. το "error_count" είναι σφάλματα και όχι ρυθμός, παρότι περιέχει "count".
-    UTILIZATION("util", "usage", "load", "cpu", "gpu", "busy", "percent"),
-    LATENCY("latency", "delay", "duration", "resptime", "responsetime", "_ms", "ms", "lag", "wait"),
-    ERRORS("error", "err", "fail", "drop", "reject", "retry", "timeout"),
-    THROUGHPUT("throughput", "rate", "qps", "rps", "ops", "requests", "msgs", "count", "bytes"),
-    MEMORY("mem", "ram", "heap", "swap"),
-    TEMPERATURE("temp", "thermal", "celsius"),
-    HUMIDITY("humid", "rh"),
-    PRESSURE("pressure", "hpa", "mbar", "baro"),
-    WIND("wind", "gust"),
-    RAIN("rain", "precip", "snow", "mm"),
+    // Τα ελληνικά hints γράφονται ΧΩΡΙΣ τόνους: το όνομα του πεδίου κανονικοποιείται πρώτα, ώστε
+    // "Θερμοκρασία", "ΘΕΡΜΟΚΡΑΣΙΑ" και "θερμοκρασια" να είναι το ίδιο πράγμα.
+    UTILIZATION("util", "usage", "load", "cpu", "gpu", "busy", "percent", "χρησ", "φορτι", "απασχολ"),
+    LATENCY("latency", "delay", "duration", "resptime", "responsetime", "ms", "lag", "wait",
+            "καθυστερ", "αναμον", "διαρκει"),
+    ERRORS("error", "err", "fail", "drop", "reject", "retry", "timeout", "σφαλμ", "αποτυχ", "απορρι"),
+    THROUGHPUT("throughput", "rate", "qps", "rps", "ops", "requests", "msgs", "count", "bytes",
+            "ρυθμ", "αιτημ", "πληθ", "μηνυμ"),
+    MEMORY("mem", "ram", "heap", "swap", "μνημ"),
+    TEMPERATURE("temp", "thermal", "celsius", "θερμ"),
+    HUMIDITY("humid", "rh", "υγρασ"),
+    PRESSURE("pressure", "hpa", "mbar", "baro", "πιεσ"),
+    WIND("wind", "gust", "ανεμ", "ριπ"),
+    RAIN("rain", "precip", "snow", "mm", "βροχ", "χιον", "υετ"),
     OTHER();
 
     private final List<String> hints;
@@ -39,15 +43,43 @@ public enum FieldRoles {
     }
 
     public static FieldRoles of(String field) {
-        String name = field.toLowerCase().replace("_", "").replace("-", "");
+        String name = normalize(field);
         for (FieldRoles role : values()) {
             for (String hint : role.hints) {
-                if (name.contains(hint.replace("_", ""))) {
+                if (matches(name, hint)) {
                     return role;
                 }
             }
         }
         return OTHER;
+    }
+
+    /**
+     * Ένα hint δύο χαρακτήρων ταιριάζει μόνο στο τέλος ή ως ολόκληρο όνομα. Αλλιώς το "ms" της
+     * καθυστέρησης χαρακτήριζε το "msgs" ως καθυστέρηση (και κέρδιζε, αφού το LATENCY είναι πριν
+     * από το THROUGHPUT) και το "rh" της υγρασίας θα έπιανε κάθε "throughput".
+     */
+    private static boolean matches(String name, String hint) {
+        return hint.length() > 2 ? name.contains(hint) : name.endsWith(hint) || name.equals(hint);
+    }
+
+    /**
+     * Πεζά, χωρίς τόνους, χωρίς διαχωριστικά. Τα ελληνικά ονόματα πεδίων έρχονται και με τόνο και
+     * χωρίς ("Θερμοκρασία" από CSV, "ΘΕΡΜΟΚΡΑΣΙΑ" από κεφαλαία επικεφαλίδα), και το τελικό «ς»
+     * είναι άλλος χαρακτήρας από το «σ».
+     */
+    private static String normalize(String field) {
+        String lower = field.toLowerCase(java.util.Locale.ROOT).replace("_", "").replace("-", "")
+                .replace("ς", "σ");
+        String decomposed = java.text.Normalizer.normalize(lower, java.text.Normalizer.Form.NFD);
+        StringBuilder sb = new StringBuilder(decomposed.length());
+        for (int i = 0; i < decomposed.length(); i++) {
+            char c = decomposed.charAt(i);
+            if (Character.getType(c) != Character.NON_SPACING_MARK) {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
     }
 
     public static Map<String, FieldRoles> of(List<String> fields) {
