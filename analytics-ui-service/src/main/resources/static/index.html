@@ -282,6 +282,14 @@ const $ = id => document.getElementById(id);
 const fmtTime = iso => new Date(iso).toLocaleString('el-GR',
   { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 const fmtClock = iso => new Date(iso).toLocaleTimeString('el-GR', { hour: '2-digit', minute: '2-digit' });
+/** Τιμή πεδίου όπως είναι: τα κειμενικά πεδία δεν είναι αριθμοί και δεν πρέπει να γίνονται NaN. */
+function fmtValue(v) {
+  if (v === null || v === undefined) return '—';
+  if (typeof v === 'number') return fmtNum(v);
+  if (typeof v === 'boolean') return v ? 'ναι' : 'όχι';
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
 function fmtNum(v) {
   if (v === null || v === undefined || Number.isNaN(v)) return '—';
   const abs = Math.abs(v);
@@ -295,6 +303,22 @@ const state = {
   source: null, range: '12h', bucket: 'auto', profile: 'auto',
   cursor: null, timer: null, highlight: null, data: null, loading: false
 };
+
+/* Η κατάσταση ζει και στο URL: ο σύνδεσμος μοιράζεται, το refresh δεν χάνει τίποτα, και το
+   κουμπί «πίσω» του browser δουλεύει όπως περιμένει κανείς. */
+function readUrl() {
+  const params = new URLSearchParams(location.search);
+  ['source', 'range', 'bucket', 'profile'].forEach(key => {
+    const value = params.get(key);
+    if (value) state[key] = value;
+  });
+}
+function writeUrl() {
+  const params = new URLSearchParams({
+    source: state.source, range: state.range, bucket: state.bucket, profile: state.profile
+  });
+  history.replaceState(null, '', location.pathname + '?' + params);
+}
 
 /* ================================================================ γραφήματα */
 const charts = {};
@@ -349,7 +373,17 @@ async function boot() {
     $('profile').innerHTML = '<option value="auto">αυτόματο</option>' +
       profiles.map(p => `<option value="${p.id}">${p.title}</option>`).join('');
     window.PROFILES = Object.fromEntries(profiles.map(p => [p.id, p]));
-    state.source = sources[0].sourceId;
+
+    readUrl();
+    const known = sources.some(s => s.sourceId === state.source);
+    if (!known) {
+      state.source = sources[0].sourceId;
+    }
+    // Τα κουμπιά δείχνουν ό,τι λέει το URL.
+    $('source').value = state.source;
+    $('bucket').value = state.bucket;
+    $('profile').value = state.profile;
+    [...$('ranges').children].forEach(b => b.classList.toggle('on', b.dataset.range === state.range));
     await load();
   } catch (e) {
     showError('Αποτυχία εκκίνησης: ' + e.message);
@@ -361,6 +395,7 @@ async function load() {
   state.loading = true;
   $('main').classList.add('loading');
   $('status').textContent = 'φορτώνει…';
+  writeUrl();
   const started = performance.now();
   try {
     const data = await getJson('api/dashboard?' + new URLSearchParams({
@@ -813,7 +848,13 @@ function renderAnomalies(a) {
 function renderRecords(page, reset) {
   const rows = page.records || [];
   if (reset) {
-    const fields = rows.length ? Object.keys(rows[0].fields) : [];
+    const fields = rows.length
+      ? Object.keys(rows[0].fields).sort((a, b) => {
+          const na = typeof rows[0].fields[a] === 'number';
+          const nb = typeof rows[0].fields[b] === 'number';
+          return na === nb ? a.localeCompare(b, 'el') : (na ? -1 : 1);
+        })
+      : [];
     $('recordTable').innerHTML = `<thead><tr><th>χρόνος γεγονότος</th><th>topic</th>`
       + fields.map(f => `<th class="num">${f}</th>`).join('') + `</tr></thead><tbody></tbody>`;
     $('recordTable').dataset.fields = JSON.stringify(fields);
@@ -823,7 +864,11 @@ function renderRecords(page, reset) {
   body.insertAdjacentHTML('beforeend', rows.map(r => `<tr>
       <td style="white-space:nowrap">${fmtTime(r.eventTime)}</td>
       <td class="muted">${r.topic}</td>`
-    + fields.map(f => `<td class="num">${fmtNum(r.fields[f])}</td>`).join('') + `</tr>`).join(''));
+    + fields.map(f => {
+        const v = r.fields[f];
+        const numeric = typeof v === 'number';
+        return `<td class="${numeric ? 'num' : 'muted'}">${fmtValue(v)}</td>`;
+      }).join('') + `</tr>`).join(''));
 
   state.cursor = page.nextCursor;
   $('more').style.display = page.hasMore ? '' : 'none';
