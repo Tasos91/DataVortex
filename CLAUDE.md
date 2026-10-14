@@ -347,6 +347,16 @@ tooltip δείχνει πόσες μετρήσεις έχει ο κουβάς, �
 ~10 λεπτά για 6M σημεία — και `compress_chunk()` στα παλιά chunks. Καθάρισε μετά με
 `DELETE FROM metric_points WHERE source_id='scale-test'`.
 
+## Έλεγχοι υγείας που σημαίνουν κάτι
+Το `/actuator/health` έλεγε `UP` ακόμα κι όταν έλειπε η μοναδική εξάρτηση: απαντούσε για τη
+διεργασία, όχι για το αν μπορεί να κάνει τη δουλειά της. Τώρα, με `show-details: always`:
+- **ingestion** → `kafka` (clusterId, πλήθος brokers) και `db`
+- **api** → `db`
+- **analytics-ui** → `apiService` (url, πλήθος πηγών, latency σε ms)
+
+Δοκιμασμένο: με το api-service σβηστό, το analytics-ui γυρίζει **DOWN** με το σφάλμα μέσα, και
+επανέρχεται σε UP μόλις σηκωθεί.
+
 ## Παρατηρησιμότητα: τι υπάρχει και πού
 - **Δύο dashboards** (provisioned, χωρίς κλικ): `datavortex` (εισαγωγή) και `datavortex-pipeline`
   (**όλος ο σωλήνας**: lag, ρυθμοί στα τρία στάδια, καθυστερήσεις, cache hit ratio, προβλήματα).
