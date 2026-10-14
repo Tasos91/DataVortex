@@ -133,6 +133,9 @@ public class KafkaTopicService {
         if (assignmentWaitMs <= 0 || consumerGroup == null || consumerGroup.isBlank()) {
             return;
         }
+        if (!matchesConsumerPattern(topic)) {
+            return; // ο consumer δεν πρόκειται να το αναλάβει ποτέ· η αναμονή θα ήταν σίγουρη καθυστέρηση
+        }
         long deadline = System.currentTimeMillis() + assignmentWaitMs;
         long started = System.nanoTime();
         while (System.currentTimeMillis() < deadline) {
@@ -209,17 +212,24 @@ public class KafkaTopicService {
      * καταναλώνει άλλη εφαρμογή).
      */
     private void warnIfConsumerIgnores(String topic) {
-        if (consumerPattern == null || consumerPattern.isBlank() || topic.equals(dlqTopic)) {
+        if (topic.equals(dlqTopic) || matchesConsumerPattern(topic)) {
             return;
         }
+        log.warn("Το topic '{}' δεν ταιριάζει με το pattern του consumer ('{}'): "
+                + "τα μηνύματα θα σταλούν, αλλά ο consumer αυτής της εφαρμογής δεν θα τα διαβάσει.",
+                topic, consumerPattern);
+    }
+
+    /** Χωρίς pattern θεωρούμε ότι τα διαβάζει όλα — δεν έχουμε λόγο να υποθέσουμε το αντίθετο. */
+    private boolean matchesConsumerPattern(String topic) {
+        if (consumerPattern == null || consumerPattern.isBlank()) {
+            return true;
+        }
         try {
-            if (!Pattern.matches(consumerPattern, topic)) {
-                log.warn("Το topic '{}' δεν ταιριάζει με το pattern του consumer ('{}'): "
-                        + "τα μηνύματα θα σταλούν, αλλά ο consumer αυτής της εφαρμογής δεν θα τα διαβάσει.",
-                        topic, consumerPattern);
-            }
+            return Pattern.matches(consumerPattern, topic);
         } catch (RuntimeException e) {
             log.warn("Άκυρο pattern consumer '{}': {}", consumerPattern, e.getMessage());
+            return true;
         }
     }
 

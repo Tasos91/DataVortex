@@ -71,6 +71,11 @@ bash run-all.sh [ingestion|api|ui]               # τρέξιμο (logs στο l
     μπλοκάρισμα στο `send()` **είναι** το backpressure. Με 64MB το `delivery.timeout.ms` ΑΚΥΡΩΝΕ εγγραφές.
 11. Το DLQ `KafkaTemplate` **δεν** είναι bean επίτηδες: δεύτερο `KafkaTemplate`/`ProducerFactory` στο
     context ακυρώνει το `KafkaAutoConfiguration`.
+11β. **Ο serializer είναι ο `CachingProtobufSerializer`, όχι ο `KafkaProtobufSerializer`.** Ο δεύτερος
+    ξαναψάχνει το σχήμα σε κάθε μήνυμα και βγάζει **89.206/s** ενώ το σκέτο Protobuf βγάζει
+    **1.459.854/s** — 18x πιο αργός για 6 bytes. Ο δικός μας μαθαίνει το prefix μία φορά **από τον
+    ίδιο τον Confluent serializer** (άρα δεν μαντεύει το wire format) και βγάζει **1.063.829/s**.
+    Τα bytes είναι ίδια byte-προς-byte, με test. Το σχήμα καταχωρείται κανονικά στο registry.
 12. Τα topics δεν δημιουργούνται αυτόματα (`auto.create.topics.enable=false`, αλλιώς 1 partition).
     Είτε `createTopicIfMissing: true`, είτε χειροκίνητα.
 
@@ -95,6 +100,10 @@ bash run-all.sh [ingestion|api|ui]               # τρέξιμο (logs στο l
     διακόσμηση: χωρίς αυτό παράλληλοι consumers κάνουν deadlock (φάνηκε στις 100.000 εγγραφές).
 18. Το TimescaleDB απαιτεί τη διάσταση χρόνου σε κάθε unique index και τα `segmentby` μέσα σ' αυτό —
     γι' αυτό `segmentby = topic` μόνο. **Καμία retention policy** (θα έσβηνε δεδομένα).
+18β. **Μην ξαναφτιάξεις τα `*_event_time_idx`** (V4 τα σβήνει). Το `create_hypertable` τα φτιάχνει μόνο
+    του, αλλά το pkey του `ingested_records` ξεκινά ήδη από `event_time`, και το `metric_points`
+    διαβάζεται πάντα με `source_id`. Κόστιζαν **19% του ρυθμού εγγραφής και 106 MB**, με μηδενικό
+    όφελος στα ερωτήματα (μετρημένο και στα δύο).
 19. Το read-only του api-service επιβάλλεται **από τον server**
     (`options=-c default_transaction_read_only=on`): το `readOnly` του Hikari/pgjdbc ισχύει μόνο μέσα σε
     ρητό transaction και με autocommit τα INSERT περνούσαν.
@@ -165,6 +174,32 @@ writer γράφει στο `metric_points` μόνο ό,τι έχει `jsonb_type
 Υγεία με νόημα: ingestion → `kafka`+`db`, api → `db`, ui → `apiService` (+latency).
 Μετρικές: `datavortex.{ingest.records,ingest.flush,consume.records,consume.batch.size,db.insert,db.rows}`
 και `datavortex.kafka.consumer.lag` (AdminClient/15s, **μόνο** για topics του pattern — αλλιώς ψεύτικο lag).
+
+## Απόδοση του σωλήνα εισαγωγής
+`bash scripts/bench-ingest.sh <csv> <plan.json> <sourceId> [γραμμές]` μετρά τα δύο νούμερα που
+μετράνε: τον χρόνο του HTTP (ανάγνωση → Protobuf → acks του Kafka) και τον χρόνο μέχρι να φτάσει η
+**τελευταία** εγγραφή στη βάση.
+
+Μετρημένο με **200.000 εγγραφές × 5 μετρικές** (i3-8100, όλα στο ίδιο μηχάνημα):
+
+| | Πριν | Μετά |
+|---|---|---|
+| HTTP | 15.551 ms (12.860/s) | **5.101 ms (39.207/s)** |
+| Μέχρι τη βάση | 24.608 ms (8.127/s) | **17.155 ms (11.658/s)** |
+
+**Πού πάει ο χρόνος** (μετρημένο, όχι υποθέσεις — οι δύο πρώτες εικασίες ήταν λάθος):
+- ανάγνωση CSV: 823.045/s · CSV → Protobuf: 269.541/s · `fieldsToJson`: 213.447/s — **όλα αμελητέα**
+- `KafkaProtobufSerializer`: **89.206/s** ← εδώ ήταν το 95% του HTTP χρόνου
+- ένα INSERT 500 γραμμών μόνο του: **17 ms**· υπό φορτίο 113 ms (ανταγωνισμός 4 πυρήνων)
+
+**Τι ΔΕΝ βοήθησε** (δοκιμασμένο, για να μην ξαναδοκιμαστεί): `linger.ms` 5→50, `batch.size` 64K→256K,
+`compression` lz4/zstd/none (ίδια μέσα στον θόρυβο), `max.poll.records` 500→2000, `batch-rows`→2000.
+Λιγότερα consumer threads είναι **χειρότερα** (I/O-wait, όχι CPU): 6 νήματα > 4 > 3.
+Το `synchronous_commit=off` δίνει +17%, αλλά δεν είναι default — το κέρδος δεν δικαιολογεί τον κίνδυνο.
+
+**Προσοχή στις μετρήσεις:** η βάση μεγαλώνει με κάθε τρέξιμο και τα δοκιμαστικά topics συσσωρεύονται
+(ο consumer τα παρακολουθεί όλα). Χωρίς καθάρισμα + `VACUUM` ανάμεσα, ο θόρυβος είναι μεγαλύτερος από
+το σήμα — δύο «ίδια» τρεξίματα έδωσαν 14,3 s και 22,6 s.
 
 ## Πού είναι τα υπόλοιπα
 - **[docs/NOTES.md](docs/NOTES.md)** — το πλήρες ιστορικό: μετρημένες αποδόσεις, τι βρήκε κάθε πέρασμα
