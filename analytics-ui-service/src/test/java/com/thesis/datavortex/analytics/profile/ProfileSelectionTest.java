@@ -28,6 +28,45 @@ class ProfileSelectionTest {
     }
 
     @Test
+    void greekFieldNamesRevealTheirMeaningToo() {
+        // Ένα CSV από ελληνικό Excel έχει ελληνικές επικεφαλίδες. Χωρίς αυτό, κάθε τέτοιο αρχείο
+        // έπεφτε στο generic και έχανε την εποχική βάση και τις μετεωρολογικές κατηγορίες.
+        assertEquals(FieldRoles.TEMPERATURE, FieldRoles.of("θερμοκρασία"));
+        assertEquals(FieldRoles.TEMPERATURE, FieldRoles.of("ΘΕΡΜΟΚΡΑΣΙΑ"), "κεφαλαία χωρίς τόνο");
+        assertEquals(FieldRoles.HUMIDITY, FieldRoles.of("Υγρασία"));
+        assertEquals(FieldRoles.WIND, FieldRoles.of("άνεμος"), "τελικό ς");
+        assertEquals(FieldRoles.RAIN, FieldRoles.of("βροχή"));
+        assertEquals(FieldRoles.PRESSURE, FieldRoles.of("πίεση"));
+        assertEquals(FieldRoles.LATENCY, FieldRoles.of("καθυστέρηση_ms"));
+        assertEquals(FieldRoles.UTILIZATION, FieldRoles.of("χρήση_cpu"));
+        assertEquals(FieldRoles.ERRORS, FieldRoles.of("σφάλματα"));
+        assertEquals(FieldRoles.MEMORY, FieldRoles.of("μνήμη"));
+        assertEquals(FieldRoles.OTHER, FieldRoles.of("σημείωση"));
+    }
+
+    @Test
+    void shortHintsMatchOnlyAtTheEnd() {
+        // Το "ms" της καθυστέρησης χαρακτήριζε το "msgs" ως καθυστέρηση, και κέρδιζε επειδή το
+        // LATENCY δηλώνεται πριν από το THROUGHPUT.
+        assertEquals(FieldRoles.THROUGHPUT, FieldRoles.of("msgs"));
+        assertEquals(FieldRoles.THROUGHPUT, FieldRoles.of("msgs_per_sec"));
+        assertEquals(FieldRoles.LATENCY, FieldRoles.of("latency_ms"));
+        assertEquals(FieldRoles.HUMIDITY, FieldRoles.of("rh"));
+        assertEquals(FieldRoles.THROUGHPUT, FieldRoles.of("throughput"), "το rh δεν κρύβεται μέσα του");
+    }
+
+    @Test
+    void greekWeatherCsvPicksTheWeatherProfile() {
+        DataProfile profile = registry.resolve("weather-gr",
+                List.of("θερμοκρασία", "υγρασία", "άνεμος", "βροχή"), "auto");
+        assertEquals("weather", profile.id());
+
+        DataProfile byName = registry.resolve("σταθμός-αθήνας",
+                List.of("θερμοκρασία", "υγρασία"), "auto");
+        assertEquals("weather", byName.id());
+    }
+
+    @Test
     void telemetryFieldsPickTheTelemetryProfile() {
         DataProfile profile = registry.resolve("gpu-farm",
                 List.of("GpuUtil", "LatencyMs", "MemGb", "Throughput"), "auto");

@@ -91,6 +91,7 @@ public class IngestedRecordWriter {
     private static final int DEFAULT_BATCH_ROWS = 1000;
 
     private final JdbcTemplate jdbc;
+    private final AggregateRefresher refresher;
     private final Timer insertTimer;
     private final Counter rowsWritten;
     private final Counter rowsDuplicate;
@@ -103,8 +104,9 @@ public class IngestedRecordWriter {
     @Value("${datavortex.batch-rows:1000}")
     private int batchRows;
 
-    public IngestedRecordWriter(JdbcTemplate jdbc, MeterRegistry registry) {
+    public IngestedRecordWriter(JdbcTemplate jdbc, AggregateRefresher refresher, MeterRegistry registry) {
         this.jdbc = jdbc;
+        this.refresher = refresher;
         this.insertTimer = Timer.builder("datavortex.db.insert")
                 .description("Διάρκεια ενός multi-row INSERT")
                 .publishPercentileHistogram()
@@ -151,6 +153,17 @@ public class IngestedRecordWriter {
             written += writeChunk(chunk);
         }
         insertTimer.record(System.nanoTime() - started, java.util.concurrent.TimeUnit.NANOSECONDS);
+
+        if (written > 0) {
+            // Αν το batch ήταν ιστορικό (backfill), τα συγκεντρωτικά δεν θα το δουν ποτέ μόνα τους.
+            long min = Long.MAX_VALUE;
+            long max = Long.MIN_VALUE;
+            for (Row row : rows) {
+                min = Math.min(min, row.eventTimeMillis());
+                max = Math.max(max, row.eventTimeMillis());
+            }
+            refresher.noteWritten(min, max);
+        }
         totalWritten.addAndGet(written);
         rowsWritten.increment(written);
         // Ό,τι δεν γράφτηκε και δεν απορρίφθηκε, ήταν διπλό (ON CONFLICT DO NOTHING)

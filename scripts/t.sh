@@ -23,6 +23,17 @@ fi
 # Τα παλιά reports φεύγουν, αλλιώς η σύνοψη μετράει περασμένα τρεξίματα.
 for m in "${MODULES[@]}"; do rm -rf "$m/target/surefire-reports"; done
 
+# ΠΡΟΣΟΧΗ, αυτό έχει δαγκώσει: το incremental compile του maven δεν ξαναμεταγλωττίζει test
+# sources που δεν άλλαξαν, ακόμα κι όταν άλλαξε η υπογραφή που καλούν. Ένα test με σφάλμα
+# μεταγλώττισης έτρεχε με το ΠΑΛΙΟ .class και η σουίτα περνούσε πράσινη. Αν ο κώδικας είναι
+# νεότερος από τα μεταγλωττισμένα tests, τα ξαναχτίζουμε από την αρχή.
+for m in "${MODULES[@]}"; do
+  [ -d "$m/target/test-classes" ] || continue
+  if [ -n "$(find "$m/src/main" -newer "$m/target/test-classes" -name '*.java' -print -quit 2>/dev/null)" ]; then
+    rm -rf "$m/target/test-classes"
+  fi
+done
+
 LOG="$(mktemp)"
 ARGS=("${SEL[@]}" test)
 [ -n "$TEST" ] && ARGS+=("-Dtest=$TEST" -DfailIfNoTests=false)

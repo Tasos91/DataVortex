@@ -25,6 +25,12 @@ bash scripts/proto.sh                            # ΜΕΤΑ από αλλαγή 
 bash run-all.sh [ingestion|api|ui]               # τρέξιμο (logs στο logs/)
 ```
 - Δούλεψε πάντα με `-pl <module>`, ποτέ σε όλο το reactor. Μην τρέχεις `package`/`clean` αδικαιολόγητα.
+- **Το incremental compile του maven κρύβει σφάλματα στα tests**: ένα test που καλεί υπογραφή που
+  άλλαξε δεν ξαναμεταγλωττίζεται και τρέχει με το **παλιό** `.class` — πράσινη σουίτα με σπασμένο
+  κώδικα. Το `scripts/t.sh` σβήνει τα `test-classes` όταν το `src/main` είναι νεότερο· αν τρέξεις
+  maven με το χέρι, θυμήσου το.
+- Τα `*IT` **δεν** τρέχουν με το `t.sh all` (είναι surefire, όχι failsafe). Ρητά:
+  `./mvnw -o -pl ingestion-service test -Dtest=IngestedRecordWriterIT` (θέλει Docker, ~16s).
 - ΜΗΝ τρέχεις `KafkaCollectorApplicationTests` (`@SpringBootTest`, θέλει βάση + Kafka).
 - Το `IngestedRecordProto` **παράγεται** στο compile του `common`· μην το ψάχνεις στο `src/`.
 - **Χωρίς Lombok** (αφαιρέθηκε): ρητό `private static final Logger log = LoggerFactory.getLogger(X.class);`.
@@ -45,6 +51,11 @@ bash run-all.sh [ingestion|api|ui]               # τρέξιμο (logs στο l
    Πεδίο που δεν βρέθηκε → παράλειψη + debug, όχι σφάλμα.
 4. **Ο consumer ακούει σε pattern** `ingest\..*` (`destination-is-pattern: true`). Άρα τα topics πρέπει να
    λέγονται `ingest.<κάτι>`. Το `dlq.ingest` είναι επίτηδες **έξω** από το pattern (αλλιώς βρόχος).
+4β. **ΜΗΝ αφαιρέσεις το `KafkaTopicService.awaitConsumerAssignment`.** Σε νέο topic ο consumer το
+   ανακαλύπτει στο επόμενο metadata refresh και ξεκινά από το **τέλος** των partitions: τα μηνύματα που
+   στάλθηκαν στο μεταξύ **δεν διαβάζονται ποτέ**, δεν πάνε στο DLQ, και ο client έχει πάρει `200`.
+   Μετρημένο: 960 εγγραφές → **1** στη βάση. Με την αναμονή: 960/960, κόστος ~3,3s **μόνο** την πρώτη
+   φορά ανά topic. Γι' αυτό και το `metadata.max.age.ms` είναι 5s, όχι 30s.
 5. **`keyField`** → partition: ίδιο κλειδί = εγγυημένη σειρά. ΜΗΝ βάλεις `sourceId` ως κλειδί (όλα σε ένα
    partition, μηδενίζει τον παραλληλισμό). Χωρίς `keyField` → μέγιστο throughput, καμία σειρά.
 6. **`timeField`** → ο χρόνος του γεγονότος γίνεται timestamp του μηνύματος Kafka, άρα και `event_time`
@@ -73,6 +84,12 @@ bash run-all.sh [ingestion|api|ui]               # τρέξιμο (logs στο l
     `PRIMARY KEY (event_time, topic, kafka_partition, kafka_offset)` + `ON CONFLICT DO NOTHING`.
     Δοκιμασμένο: πλήρες replay → 0 νέες γραμμές.
 16. **Ο πίνακας δεν αποκτά στήλες ανά mapping**: νέο πεδίο = νέο κλειδί στο `fields` jsonb.
+16β. **Ιστορικά δεδομένα χρειάζονται ρητό refresh** (`AggregateRefresher`). Οι πολιτικές καλύπτουν
+    κυλιόμενο παράθυρο γύρω από το τώρα (3h/3d/30d), και το `materialized_only = false` καλύπτει μόνο
+    ό,τι είναι **μετά** το watermark — όχι τρύπες πριν από αυτό. Χωρίς αυτό, ένα CSV του περασμένου
+    μήνα μπαίνει στη βάση και κάθε ερώτημα γυρίζει **άδειο**, χωρίς κανένα σφάλμα. Το refresh έχει
+    debounce (4s ησυχία): κοστίζει όσο η συσσωρευμένη ουρά ακυρώσεων, όχι όσο τα νέα δεδομένα
+    (μετρημένο: 22,8s την πρώτη φορά, **13,6ms** τη δεύτερη για το ίδιο εύρος).
 17. **Ένα statement γράφει σε τρεις πίνακες** (`ingested_records` → `metric_points` → `field_catalog`) με
     data-modifying CTEs και κοινό `jsonb_each`. Το `ORDER BY 1,2,3,4` στον κατάλογο **δεν** είναι
     διακόσμηση: χωρίς αυτό παράλληλοι consumers κάνουν deadlock (φάνηκε στις 100.000 εγγραφές).
@@ -93,6 +110,9 @@ bash run-all.sh [ingestion|api|ui]               # τρέξιμο (logs στο l
 24. **Κενά ≠ μηδέν**: `NaN` + `Stats.present()`, imputation με διάμεσο.
 25. Νέος τύπος δεδομένων = **μία κλάση** που υλοποιεί το `DataProfile` και δηλώνεται bean. Το
     `ProfileRegistry` διαλέγει με βαθμολογία, όχι με πίνακα· το `generic` βαθμολογεί πάντα 1.
+25β. Το `FieldRoles` καταλαβαίνει **και ελληνικά** ονόματα πεδίων (χωρίς τόνους, τελικό ς), αλλιώς
+    κάθε CSV από ελληνικό Excel έπεφτε στο `generic`. Τα hints ≤2 χαρακτήρων ταιριάζουν μόνο στο
+    **τέλος**: το `ms` χαρακτήριζε το `msgs` ως καθυστέρηση και κέρδιζε, αφού το LATENCY είναι πρώτο.
 
 **Spring Boot 4 / Jackson**
 26. Το MVC χρησιμοποιεί **Jackson 3** (`tools.jackson`), ο κώδικας **Jackson 2** (`com.fasterxml`).
@@ -111,10 +131,27 @@ bash run-all.sh [ingestion|api|ui]               # τρέξιμο (logs στο l
 |---|---|
 | `POST /api/v1/upload` | JSON με `payload` μέσα, ή `fileType`+`filePath`. Όλο στη μνήμη. |
 | `POST /api/v1/stream` | **NDJSON**: 1η γραμμή ρυθμίσεις, μετά 1 εγγραφή/γραμμή. Μία γραμμή στη μνήμη. |
-| `POST /api/v1/csv/inspect` | CSV (multipart ή raw) → στήλες, τύποι, δείγματα, **έτοιμες προτάσεις** mapping |
-| `POST /api/v1/csv/ingest` | multipart `file` + `plan` → streaming εισαγωγή με τα mappings του χρήστη |
-| `GET /csv` | η σελίδα επιλογής στηλών (drag & drop) |
+| `POST /api/v1/csv/inspect` | CSV (multipart ή raw ή `?path=`) → στήλες, τύποι, δείγματα, **έτοιμο plan** |
+| `POST /api/v1/csv/ingest` | multipart `file`+`plan`, ή `plan` στο σώμα με `?path=` → streaming εισαγωγή |
+| `POST /api/v1/aggregates/refresh?from=&to=` | ρητή υλοποίηση συγκεντρωτικών (δες κανόνα 16β) |
+| `GET /csv` | η σελίδα επιλογής στηλών (drag & drop, `#demo` για παράδειγμα) |
 | `GET /dashboard` | στατιστικά εισαγωγής |
+
+### Ο σωλήνας του CSV
+Το CSV **δεν** έχει τύπους, και εκεί ήταν το κρυφό σφάλμα: κάθε στήλη πήγαινε ως `string_value`, ο
+writer γράφει στο `metric_points` μόνο ό,τι έχει `jsonb_typeof = 'number'`, άρα **κανένα CSV δεν
+παρήγαγε ποτέ μετρική** — δεδομένα στη βάση, άδειο γράφημα, μηδέν σφάλματα.
+- `csv/CsvReader` — RFC 4180 σε ροή: εισαγωγικά, κόμμα/newline μέσα σε πεδίο, `""`, CRLF, BOM.
+  Το `line.split(",")` που ήταν πριν χάλαγε σε κάθε αληθινό αρχείο.
+- `csv/CsvValues` — τύποι και **δεκαδικό σύμβολο**: το ελληνικό `23,5` ήταν `235`. Τα `NA/-/null`
+  είναι **απουσία**, όχι μηδέν. Οι αμφίσημες μορφές (`dd/MM` vs `MM/dd`) ΔΕΝ μαντεύονται: θέλουν `timeFormat`.
+- `csv/CsvInspector` — δείγμα 200 γραμμών → τύπος/κάλυψη/καρδινότητα ανά στήλη + **έτοιμο `CsvPlan`**.
+  Το διαχωριστικό κρίνεται από τη **σταθερότητα** των στηλών, όχι από τη συχνότητα.
+- `csv/CsvPlan` — τι διάλεξε ο χρήστης. Στο `columns` μπαίνουν **μόνο** οι στήλες που θέλει.
+- `service/CsvIngestService` — γραμμή CSV → **απευθείας** Protobuf. Καμία ενδιάμεση
+  `HashMap`/`JsonNode`/re-serialization. Η διάταξη προ-υπολογίζεται μία φορά σε πίνακες.
+  Λάθος `timeFormat` πιάνεται στην **πρώτη** γραμμή, πριν σταλεί μήνυμα.
+- Το `/upload` με `fileType: CSV` περνά τώρα από τον ίδιο δρόμο (κερδίζει parser και τύπους).
 
 **api (`:8082`)** — `sources`, `sources/{s}/fields`, `series`, `matrix` (κουβάδες × πεδία, για ML),
 `rates`, `records` (keyset, max 1000). Όλα κάτω από `/api/v1`.

@@ -2,7 +2,7 @@ package com.thesis.kafkacollector.controller;
 
 import com.thesis.kafkacollector.dto.IngestionRequest;
 import com.thesis.kafkacollector.service.FileStreamingService;
-import com.thesis.kafkacollector.service.FileStreamingService.IngestResult;
+import com.thesis.kafkacollector.service.IngestResult;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;

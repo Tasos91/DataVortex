@@ -68,9 +68,10 @@ public class WeatherProfile implements DataProfile {
             return 0; // μόνο θερμοκρασία: μπορεί να είναι και τηλεμετρία μηχανήματος
         }
         int score = 3 * companions + 2;
-        String name = sourceId.toLowerCase();
+        String name = sourceId.toLowerCase(java.util.Locale.ROOT);
         if (name.contains("weather") || name.contains("meteo") || name.contains("climate")
-                || name.contains("station") || name.contains("kair")) {
+                || name.contains("station") || name.contains("kair")
+                || name.contains("καιρ") || name.contains("μετεωρ") || name.contains("σταθμ")) {
             score += 4;
         }
         return score;
