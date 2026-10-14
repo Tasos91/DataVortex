@@ -32,3 +32,6 @@ build/
 ### VS Code ###
 .vscode/
 logs/
+
+### Claude Code (τοπικές ρυθμίσεις, όχι οι κοινές)
+.claude/settings.local.json

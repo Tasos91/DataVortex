@@ -1,0 +1,395 @@
+# datavortex
+
+Spring Boot 4 / Java 21 εφαρμογή (διπλωματική): δέχεται δεδομένα μέσω REST, τα μετατρέπει σε
+Protobuf και τα στέλνει στο Kafka· ένας batch consumer τα διαβάζει πίσω και τα αποθηκεύει σε
+TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
+Η υπόλοιπη περιγραφή εδώ είναι μόνο ό,τι δεν φαίνεται εύκολα από τον κώδικα.
+
+## Πλάνο και πρόοδος (ΔΙΑΒΑΣΕ ΠΡΩΤΑ ΑΥΤΟ — συνέχισε από το πρώτο ανολοκλήρωτο)
+Μεγάλη επέκταση σε 7 βήματα, ένα branch ανά βήμα: branch -> commit -> push -> merge στο master -> push.
+- [x] **Β1 μετρικές** — Micrometer/Prometheus σε όλα τα επίπεδα, consumer lag, Grafana dashboard (provisioned).
+- [x] **Β2 καθαρισμός lat/lon** — έφυγαν από proto (reserved 3,4), βάση (V2), mapper, writer, tests.
+- [x] **Β3 τρία services (multi-module Maven)** — `common`, `ingestion-service`, `api-service` (σκελετός),
+      `analytics-ui-service` (σκελετός). Τα δύο τελευταία γεμίζουν στα Β4/Β5.
+- [x] **Β4 api-service** — read-only REST, continuous aggregates, keyset pagination, cache, ETag.
+- [x] **Β5 analytics-ui-service** — UI, 3 προφίλ ανάλυσης, ML πυρήνας χωρίς εξαρτήσεις, 40 unit tests.
+- [x] **Β6 integration tests** — 24 integration tests σε 3 επίπεδα, συν 59 unit = **83 συνολικά**.
+- [x] **Β7 τελικό πέρασμα** — απόδοση (Β7α) και UI (Β7β). Δες τα δύο σχετικά κεφάλαια.
+
+## Εντολές (το μηχάνημα έχει αργή CPU, 4 πυρήνες: τρέχε το ελάχιστο)
+- Η default `java` είναι 11. Πάντα: `export JAVA_HOME=~/.jdks/corretto-21.0.2`
+- **Multi-module:** δούλεψε πάντα με `-pl <module>`, όχι σε όλο το reactor.
+  - Compile ενός service: `./mvnw -q -o -pl ingestion-service compile`
+  - Ένα test: `./mvnw -q -o -pl ingestion-service test -Dtest=RecordMapperTest`
+  - Τρέξιμο ενός service: `./mvnw -q -o -pl api-service spring-boot:run`
+  - Όλα μαζί: `bash run-all.sh` (logs στο `logs/`), ή `bash run-all.sh api`
+- **Άλλαξες το `.proto`;** Χρειάζεται `./mvnw -q install -DskipTests -pl common -am` (χωρίς `-o`, γιατί το
+  install-plugin δεν είναι στο τοπικό repo), αλλιώς τα services βλέπουν το παλιό `common`.
+- ΜΗΝ τρέχεις `KafkaCollectorApplicationTests` (`@SpringBootTest`): θέλει βάση + Kafka και είναι αργό.
+- Μην τρέχεις όλο το test suite ή `package`/`clean` αν δεν σου το ζητήσουν.
+- Το Protobuf class (`IngestedRecordProto`) παράγεται στο compile του `common` από το `.proto`·
+  μην το επεξεργάζεσαι χειροκίνητα και μην ψάχνεις πηγαίο του στο `src/`.
+- **Χωρίς Lombok.** Αφαιρέθηκε στο Β3 (ένας annotation processor λιγότερος σε 4 modules):
+  ρητό `private static final Logger log = LoggerFactory.getLogger(X.class);`.
+
+## Τα modules
+| Module | Τι είναι | Port |
+|---|---|---|
+| `common` | μόνο το Protobuf σχήμα (μία πηγή αλήθειας για όλους) | — |
+| `ingestion-service` | REST εισαγωγή → Kafka, consumer → βάση. Κατέχει το schema (Flyway) | 8080 |
+| `api-service` | read-only REST πάνω από τη βάση· **το μόνο** που τη διαβάζει | 8082 |
+| `analytics-ui-service` | UI + clustering/classification· καλεί ΜΟΝΟ το api-service | 8085 |
+
+Το UI δεν έχει ούτε driver βάσης στο classpath — η απομόνωση είναι δομική, όχι σύμβαση.
+
+## Δομή του ingestion-service (`com.thesis.kafkacollector`)
+- `controller/IngestionController`:
+  - `POST /api/v1/upload` — JSON με `payload` μέσα, ή `fileType` + `filePath`. **Όλο το σώμα μπαίνει στη μνήμη**
+    (και σε αντίγραφα: Jackson bind -> JsonNode -> JSON string ανά record). Για βολικά, μικρά-μεσαία φορτία.
+    Πάνω από `datavortex.max-upload-bytes` (32MB) απαντά **413** και παραπέμπει στο `/stream`:
+    χωρίς αυτό το φράγμα, ένα αρκετά μεγάλο request ρίχνει τη διεργασία με OutOfMemory και παρασύρει
+    κάθε άλλη εισαγωγή που τρέχει εκείνη τη στιγμή.
+  - `POST /api/v1/stream` — **NDJSON** για μεγάλο όγκο: πρώτη γραμμή οι ρυθμίσεις, μετά μία εγγραφή ανά γραμμή.
+    Στη μνήμη βρίσκεται μία γραμμή τη φορά· μια χαλασμένη γραμμή προσπερνιέται και μετριέται.
+  - Και τα δύο: `200` μετά το `flush()` του producer (άρα το 200 σημαίνει "είναι στο Kafka"), `207` αν κάποια
+    μηνύματα απέτυχαν, `400` για λάθος request, `429` όταν τρέχουν ήδη `datavortex.max-concurrent-ingests`
+    εισαγωγές, `503` όταν ο broker δεν απαντά.
+- `controller/DashboardController`: `/dashboard` (HTML) και `/dashboard/api/stats`.
+- `service/FileStreamingService`: CSV, JSON αρχείο και inline `payload` → Protobuf → Kafka.
+- `service/KafkaTopicService`: ελέγχει/δημιουργεί το topic του request (fail-fast, με cache).
+- `service/IngestedRecordWriter`: γράφει το batch στη βάση με ΕΝΑ multi-row INSERT
+  (`ON CONFLICT DO NOTHING`), με fallback μία-μία γραμμή όταν αποτύχει το batch.
+- `mapping/JsonPathResolver` και `mapping/RecordMapper`: εφαρμόζουν τα `fieldMappings` στο payload.
+- `config/KafkaConsumerConfig`: bean `Consumer<Message<List<Object>>> consumeData` — **batch** consumer
+  (Spring Cloud Stream) → `IngestedRecordWriter`. Τα Kafka metadata (topic/partition/offset/timestamp)
+  έρχονται ως Lists στα headers.
+- `config/KafkaErrorHandlingConfig`: retries και DLQ. Το DLQ `KafkaTemplate` ΔΕΝ είναι bean επίτηδες — ένα δεύτερο
+  `KafkaTemplate`/`ProducerFactory` στο context κάνει το KafkaAutoConfiguration να μην φτιάξει το κανονικό.
+- `dto/IngestionRequest`: `sourceId`, `fileType`, `filePath`, `topic`, `createTopicIfMissing`, `partitions`,
+  `keyField`, `payload`, `fieldMappings`.
+
+## Βασικοί κανόνες σχεδιασμού
+- Το μήνυμα στο Kafka είναι **Protobuf μέσω Schema Registry** (`KafkaProtobufSerializer`/`KafkaProtobufDeserializer`,
+  `SCHEMA_REGISTRY_URL`, default `http://localhost:8081`). Producer: `KafkaTemplate<String, IngestedRecord>`,
+  consumer: `Consumer<IngestedRecord>` (δεν γίνεται χειροκίνητο `parseFrom`). Δεν υπάρχει Avro στο project.
+- Αν αλλάξεις το `.proto` ασύμβατα, ο registry θα απορρίψει το νέο schema (έλεγχος συμβατότητας).
+- Παλιά μηνύματα στο topic που στάλθηκαν ως raw bytes (χωρίς schema id) δεν διαβάζονται από τον consumer: χρησιμοποίησε νέο topic ή άδειασέ το.
+- Τα δυναμικά πεδία ζουν στο `map<string, google.protobuf.Value> fields = 5` του
+  `src/main/proto/ingested_record.proto`. Προσθήκη πεδίου = νέος αριθμός, ποτέ μην αλλάζεις/ξαναχρησιμοποιείς υπάρχοντες.
+- `fieldMappings`: `{"ΟνομαΠεδίου": "$.διαδρομή.στο.json"}`. **ΟΛΑ** τα πεδία πάνε στο `fields` jsonb· κανένα
+  όνομα δεν έχει ξεχωριστή μεταχείριση (τα `lat`/`lon` ήταν παράδειγμα και αφαιρέθηκαν). Σκέτο όνομα (χωρίς `$`)
+  = κλειδί πρώτου επιπέδου (CSV). Δεν βρέθηκε τιμή → παράλειψη + debug, όχι σφάλμα.
+- **Topic ανά request:** `"topic": "..."` στο request· αν λείπει, το default του `application.yaml`. Αν το topic δεν
+  υπάρχει → 400 αμέσως (ο broker έχει `auto.create.topics.enable=false`, αλλιώς θα το έφτιαχνε με 1 partition).
+  Με `"createTopicIfMissing": true` το φτιάχνει η εφαρμογή (`partitions`, default 6).
+- **Partition key:** `"keyField": "$.vessel.mmsi"`. Ίδιο κλειδί → ίδιο partition → εγγυημένη σειρά για την οντότητα.
+  Χωρίς `keyField` το κλειδί είναι `null` και τα μηνύματα μοιράζονται (μέγιστο throughput, καμία εγγύηση σειράς).
+  ΜΗΝ βάλεις ξανά το `sourceId` ως κλειδί: στέλνει τα πάντα σε ένα partition και μηδενίζει τον παραλληλισμό.
+- **Ο consumer ακούει σε pattern**, όχι σε ένα topic: `destination: 'ingest\..*'` με `destination-is-pattern: true`.
+  Άρα τα topics του χρήστη πρέπει να λέγονται `ingest.<κάτι>` για να διαβαστούν (αλλιώς μόνο warning στο log).
+  Το DLQ (`dlq.ingest`) είναι επίτηδες έξω από το pattern, αλλιώς θα το ξαναδιάβαζε σε βρόχο.
+- **Batch mode:** `batch-mode: true`, `max.poll.records: 500`, `fetch.min.bytes: 65536`, `fetch.max.wait.ms: 500`.
+  Με `fetch.min.bytes: 1` τα batches έβγαιναν ~45 μηνύματα· τώρα φτάνουν το όριο των 500.
+  `concurrency` (default 3) <= partitions, αλλιώς τα παραπανίσια threads μένουν άεργα.
+- **Poison pill:** `ErrorHandlingDeserializer` + `DefaultErrorHandler` + `DeadLetterPublishingRecoverer`. Χαλασμένο
+  μήνυμα → `dlq.ingest` αυτούσιο (με headers το αρχικό topic/partition/offset) και ο consumer συνεχίζει.
+- **Ο τύπος του consumer είναι `List<Object>`, όχι `List<IngestedRecord>`.** Ένα μήνυμα που δεν διαβάστηκε φτάνει
+  ως `KafkaNull`· με δηλωμένο τύπο record σκάει `ClassCastException` και φεύγει ΟΛΟ το batch (500 καλά μηνύματα)
+  στο DLQ. Αντ' αυτού γράφουμε τα καλά και πετάμε `BatchListenerFailedException(msg, index)` για το ένα χαλασμένο.
+- **Αν πέσει η βάση δεν πάει τίποτα στο DLQ:** ο `setBackOffFunction` δίνει άπειρα retries στα σφάλματα
+  υποδομής (`CannotGetJdbcConnectionException`, `DataAccessResourceFailureException`, ...). Τα offsets δεν
+  γίνονται commit, το Kafka κρατά τα δεδομένα, και η ροή συνεχίζει μόλις επανέλθει η βάση.
+- **Η απάντηση περιμένει τα acks** (`kafkaTemplate.flush()` στο `finish()`). Πριν, η απάντηση έλεγε
+  "στάλθηκαν N" ενώ τα μηνύματα ήταν ακόμα στο buffer του producer: αν έπεφτε το Kafka, ο client είχε 200
+  και τα δεδομένα δεν υπήρχαν πουθενά. ΜΗΝ αφαιρέσεις το flush.
+- **Backpressure:** semaphore `datavortex.max-concurrent-ingests` (default 4) και `max.block.ms: 10000` στον
+  producer. Χωρίς αυτά, αρκετά ταυτόχρονα requests γεμίζουν το `buffer-memory` και μπλοκάρουν όλα τα Tomcat
+  threads μέσα στο `send()` για 60s.
+- Στο Spring Boot 4 το MVC χρησιμοποιεί Jackson 3, ενώ ο κώδικας χρησιμοποιεί `com.fasterxml` (Jackson 2). Γι' αυτό το
+  `payload` στο DTO είναι `Object` και όχι `JsonNode`· μην το αλλάξεις.
+
+## Βάση δεδομένων
+- **TimescaleDB** (`timescale/timescaledb:2.30.2-pg17`), δηλαδή PostgreSQL + extension χρονοσειρών.
+  Ίδιο SQL, ίδιος driver. Volume `tsdata`· το παλιό `pgdata` (postgres:15) μένει άθικτο και δεν χρησιμοποιείται.
+- **ΧΩΡΙΣ JPA/Hibernate.** Δεν υπάρχουν entities· γράφουμε με `JdbcTemplate` σε batches. Λόγος: το Hibernate
+  απενεργοποιεί το JDBC batching με `@GeneratedValue(IDENTITY)`, που σημαίνει ένα INSERT ανά record.
+  Αν χρειαστεί JPA για μικρούς πίνακες, πρόσθεσε πίσω το `spring-boot-starter-data-jpa`.
+- **Το schema το φτιάχνει το Flyway** (`src/main/resources/db/migration/`), όχι το `ddl-auto` (είναι `none`).
+  Στο Spring Boot 4 χρειάζεται το `spring-boot-starter-flyway`: μόνο με το `flyway-core` δεν τρέχει τίποτα.
+  Νέα αλλαγή schema = νέο αρχείο `V2__...sql`· ΜΗΝ επεξεργάζεσαι migration που έχει τρέξει.
+- Πίνακας `ingested_records`: 7 στήλες — `event_time`, `topic`, `kafka_partition`, `kafka_offset`,
+  `source_id`, `fields` (jsonb, τα πεδία του χρήστη), `payload` (jsonb, το αρχικό JSON). Hypertable με
+  διάσταση χρόνου `event_time` (chunks ανά ημέρα), συμπίεση μετά από 7 ημέρες (`segmentby = topic`),
+  και `PRIMARY KEY (event_time, topic, kafka_partition, kafka_offset)`.
+- **Ο πίνακας δεν αποκτά στήλες ανά mapping.** Νέο πεδίο = νέο κλειδί μέσα στο `fields`, καμία αλλαγή schema.
+- **Idempotency:** ο consumer είναι at-least-once, άρα τα διπλά είναι αναμενόμενα. Το `(topic, partition, offset)`
+  του Kafka είναι μοναδικό, οπότε `INSERT ... ON CONFLICT DO NOTHING` αρκεί — δοκιμασμένο ότι δουλεύει και σε
+  συμπιεσμένο chunk. Το `event_time` ΠΡΕΠΕΙ να είναι το timestamp του μηνύματος Kafka (σταθερό σε κάθε
+  επανάληψη), όχι `now()`, αλλιώς το dedup δεν πιάνει.
+- **Γράψιμο:** ένα multi-row `INSERT` ανά batch (`datavortex.batch-rows`, default 1000 γραμμές/statement) και
+  `reWriteBatchedInserts=true` στο JDBC URL. Αν το batch αποτύχει, ξαναδοκιμάζεται μία-μία γραμμή ώστε να
+  περάσουν οι υπόλοιπες· μια γραμμή που απορρίπτεται από τη βάση λογίζεται ως ERROR με topic/partition/offset.
+- Το TimescaleDB απαιτεί τη διάσταση χρόνου σε κάθε unique index, και τα `segmentby` columns πρέπει να είναι
+  μέσα στο unique index· γι' αυτό το `segmentby` είναι μόνο `topic` και όχι `topic, source_id`.
+- ΔΕΝ υπάρχει retention policy (θα έσβηνε δεδομένα). Οδηγία για το πώς μπαίνει: στο V1 migration.
+
+## Ρυθμίσεις και υποδομή
+- `application.yaml`: port 8080, topic `ais-data` (`KAFKA_TOPIC`), brokers `localhost:9092`, Postgres `localhost:5432/bigdata_db`.
+  Όλα με env overrides.
+- `docker-compose.yml` (στη ρίζα): timescaledb (service `postgres`), kafka (cp 7.6.0, KRaft), schema-registry (:8081, ΑΠΑΡΑΙΤΗΤΟ για producer και consumer), prometheus, grafana.
+  Δεν έχει όρια μνήμης. Ξεκίνα μόνο ό,τι χρειάζεται: `docker compose up -d postgres kafka schema-registry`.
+  Η εφαρμογή ΔΕΝ ξεκινά χωρίς τη βάση (το Flyway τρέχει στο startup).
+- Τα topics ΔΕΝ δημιουργούνται αυτόματα, ούτε από τον broker ούτε από τον binder. Είτε φτιάξ' το με
+  `kafka-topics --create`, είτε στείλε `createTopicIfMissing: true`.
+
+## Μετρημένες αποδόσεις (i3-8100, 4 πυρήνες, όλα στο ίδιο μηχάνημα)
+- 100.000 μηνύματα: publish 8,5s· αποθήκευση ολοκληρωμένη σε 12s συνολικά (~11.400 rows/s).
+- Μέσο batch ~467 μηνύματα, 214 batches.
+- Πλήρες replay του topic: 0 νέες γραμμές (120.003 πριν και μετά), 121.386 διπλά απορρίφθηκαν από τη βάση.
+- Βάση κάτω για 25s: 0 μηνύματα στο DLQ, όλα γράφτηκαν μόλις επανήλθε.
+- NDJSON 200.000 εγγραφές (25MB): 11,5s το publish, 31s μέχρι να είναι όλα στη βάση, και η μνήμη της JVM
+  ανέβηκε μόνο 85MB (548 -> 634MB).
+- 8 ταυτόχρονα requests με όριο 4: 4 x 200 και 4 x 429.
+
+## Γιατί το API μένει γρήγορο όσο κι αν μεγαλώσουν τα δεδομένα
+Αυτό είναι η καρδιά του σχεδιασμού, μη το χαλάσεις:
+- **Continuous aggregates (TimescaleDB).** Το `metric_points` (long format: μία γραμμή ανά αριθμητικό
+  πεδίο ανά μήνυμα) συγκεντρώνεται σε `metric_1m` → `metric_1h` → `metric_1d` (ιεραρχικά: το ωριαίο
+  χτίζεται από το λεπτιαίο, όχι από τα ωμά). Μετρημένο: ίδιο ερώτημα 12 ωρών = **3,2ms** από το
+  συγκεντρωτικό έναντι **36ms** από τα ωμά, και η διαφορά μεγαλώνει γραμμικά με τον όγκο.
+- **Κρατάμε sum και sum_sq, όχι avg/stddev.** Έτσι μέσος και τυπική απόκλιση υπολογίζονται σε
+  οποιοδήποτε επίπεδο και τα συγκεντρωτικά αθροίζονται σωστά. Μέσος όρος μέσων όρων = λάθος.
+- **`materialized_only = false`**: τα φρέσκα δεδομένα φαίνονται αμέσως (το Timescale ενώνει το
+  υλικοποιημένο κομμάτι με ζωντανό query στην ουρά). Επαληθευμένο στο EXPLAIN: 718 γραμμές από το
+  υλικοποιημένο hypertable, 0 από τα ωμά.
+- **Επιλογή ανάλυσης (`Buckets`)**: `bucket=auto` διαλέγει 1m/1h/1d ώστε η απάντηση να έχει πάντα
+  ≤600 κουβάδες. Άρα το κόστος εξαρτάται από το ΠΛΗΘΟΣ ΚΟΥΒΑΔΩΝ, όχι από τον όγκο.
+- **Keyset pagination (`Cursor`), ποτέ OFFSET.** Μετρημένο: σελίδα 1 = 21,6ms, σελίδα 300 = 4,2ms
+  (σταθερό), ενώ `OFFSET 29900` στη βάση = 35,5ms έναντι 2ms για `OFFSET 0`.
+- **Cache (Caffeine, TTL 10s).** Μετρημένο: `/series` 15,8ms → 4,1ms. Τα hit/miss βγαίνουν ως
+  μετρικές, δεν είναι εικασία.
+- **Συμπίεση, όχι ETag.** Το `ShallowEtagHeaderFilter` ΑΦΑΙΡΕΘΗΚΕ: μετρήθηκε ότι εμποδίζει τη
+  συμπίεση του Tomcat (ίδια απάντηση 83 KB ασυμπίεστη με GET, gzip με HEAD). Το ETag κερδίζει μόνο
+  όταν η απάντηση δεν άλλαξε, ενώ εδώ τα δεδομένα ανανεώνονται συνεχώς. Μετρημένο αποτέλεσμα:
+  `/api/dashboard` **205 KB → 28 KB**, `/matrix` 83 KB → 16 KB, ECharts 1 MB → 334 KB.
+  Προσοχή στη λίστα mime-types: ο Tomcat σερβίρει τα `.js` ως `text/javascript`, όχι
+  `application/javascript` — με λάθος λίστα η συμπίεση απλώς δεν συμβαίνει, σιωπηλά.
+- **Το `/matrix` είναι ο δίαυλος του ML**: κουβάδες × πεδία. Το clustering τρέχει πάνω σε εκατοντάδες
+  κουβάδες, όχι σε εκατομμύρια γραμμές — γι' αυτό δεν αργεί ποτέ.
+- Ο writer γράφει σε **τρεις πίνακες με ένα statement** (data-modifying CTEs): `ingested_records`
+  (πηγή αλήθειας) → `metric_points` (μόνο για όσες γραμμές μπήκαν όντως, μέσω `RETURNING`) →
+  `field_catalog` (τι πεδία υπάρχουν, για να μη σαρώνει το UI). Ένα round-trip για τα τρία.
+- **`timeField`** στο request: ο χρόνος του γεγονότος έρχεται από το payload (epoch ή ISO-8601) και
+  γίνεται timestamp του μηνύματος Kafka, άρα και `event_time` στη βάση. Χωρίς αυτό τα ιστορικά
+  δεδομένα θα έπεφταν όλα στο "τώρα".
+
+## Endpoints του api-service (`:8082`)
+| Endpoint | Τι δίνει |
+|---|---|
+| `GET /api/v1/sources` | πηγές, topics, πλήθη, πρώτη/τελευταία εγγραφή |
+| `GET /api/v1/sources/{source}/fields` | τα πεδία και ο τύπος τους (number/string/...) |
+| `GET /api/v1/series?source=&field=&from=&to=&bucket=` | χρονοσειρά: n, avg, min, max, stddev |
+| `GET /api/v1/matrix?source=&fields=&from=&to=&bucket=` | πίνακας κουβάδες × πεδία (για ML) |
+| `GET /api/v1/rates?source=&from=&to=&bucket=` | εγγραφές ανά κουβά |
+| `GET /api/v1/records?source=&topic=&cursor=&limit=` | ωμές εγγραφές, keyset, max 1000 |
+
+## Το analytics-ui-service (`:8085`)
+UI μιας σελίδας (`static/index.html`, vanilla JS + τοπικό ECharts) που μιλά ΜΟΝΟ στο δικό του
+`/api/**`, το οποίο προωθεί στο api-service. Δεν υπάρχει driver βάσης στο classpath.
+
+**Τα προφίλ ανάλυσης — η ουσία είναι ότι ΔΕΝ είναι ίδια:**
+| Προφίλ | Αλγόριθμος | Τι κάνει διαφορετικά |
+|---|---|---|
+| `ai-telemetry` | k-means (k από silhouette) + ανθεκτική κλιμάκωση | ονομάζει τις ομάδες κατά **φορτίο** (αδράνεια→κορεσμός), και ψάχνει ρητά «υψηλή καθυστέρηση με χαμηλή χρήση» — βλάβη, όχι φόρτος |
+| `weather` | k-means (z-score) + **εποχική βάση ανά ώρα της ημέρας** | μια ζεστή νύχτα είναι ανωμαλία, ένα ζεστό μεσημέρι όχι· οι κατηγορίες είναι μετεωρολογικές (βροχή/καύσωνας/ψύχος/άνεμος), γιατί ορίζονται από το φαινόμενο και δεν «ανακαλύπτονται» |
+| `generic` | **DBSCAN** με αυτόματο eps | δεν ξέρει πόσες ομάδες υπάρχουν, και ονομάζει ρητά τα outliers «απομακρυσμένα» αντί να τα στριμώξει σε ομάδα |
+
+Νέος τύπος δεδομένων = μια κλάση που υλοποιεί το `DataProfile` και δηλώνεται bean. Το
+`ProfileRegistry` διαλέγει με **βαθμολογία** (ονόματα πεδίων μέσω `FieldRoles` + όνομα πηγής),
+όχι με πίνακα αντιστοίχισης· το `generic` βαθμολογεί πάντα 1, άρα υπάρχει πάντα απάντηση.
+
+**ML πυρήνας** (`ml/`, χωρίς εξωτερική βιβλιοθήκη): `Stats` (διάμεσος/MAD/ποσοστημόρια/EWMA/τάση),
+`Scaler` (z-score και ανθεκτικό), `KMeans` (k-means++ με σταθερό σπόρο, ώστε το UI να μη
+«χοροπηδά»), `Silhouette` (επιλογή k), `Dbscan` (με επιλογή eps βάσει κριτηρίου ποιότητας),
+`Pca` (προβολή 2D με power iteration).
+
+**Παγίδες που βρήκαμε και λύσαμε** (μη τις ξανακάνεις):
+- **Ο μέσος όρος του κουβά κρύβει τις αιχμές.** Μία αργή μέτρηση μέσα σε 80 γρήγορες δεν αλλάζει
+  τον μέσο όρο. Γι' αυτό το `/matrix` δέχεται `agg=avg|max|min` και η ανάλυση παίρνει **και** τα δύο
+  (`Input.values` = μέσοι, `Input.peaks` = αιχμές).
+- **Απόλυτα κατώφλια πάνω σε αιχμές σημαίνουν «πάντα αληθές».** Σε κουβά με 800 μετρήσεις, η
+  μέγιστη τιμή ξεπερνά κάθε κατώφλι: «έβρεξε μια στάλα» έβγαζε βροχή στο 100% του χρόνου. Κανόνας:
+  **κατώφλια → μέσοι όροι, ανωμαλίες → αιχμές** (όπου η βάση σύγκρισης είναι επίσης αιχμή).
+- **Σχετικοί κανόνες (ποσοστημόρια) χτυπούν σε επίπεδα δεδομένα.** Σε σειρά 45–49 το ανώτερο 10%
+  δεν είναι κορεσμός. Ο `varies()` απαιτεί εύρος 10–90% τουλάχιστον 15% του επιπέδου.
+- **Το MAD βγαίνει 0 με λίγα δείγματα** και ο ακραίος κρύβεται πίσω από τη δική του επίδραση. Η
+  εποχική βάση χρησιμοποιεί **συγκεντρωτική (pooled)** εκτίμηση από τα υπόλοιπα όλων των ωρών.
+- **Η ομαδοποίηση αφορά χρονικά παράθυρα, όχι μεμονωμένες εγγραφές.** Αν δύο πληθυσμοί
+  εναλλάσσονται μέσα στον ίδιο κουβά, ο μέσος όρος τους τους εξαφανίζει. Βρίσκει *καθεστώτα* στον
+  χρόνο — που είναι και ο λόγος που δεν αργεί ποτέ.
+
+## Tests (83, όλα περνούν)
+- `./mvnw -q test` τρέχει τα πάντα· τα IT με Testcontainers θέλουν Docker και ~15s ανά κλάση.
+- **Unit (59):** στατιστικά, κλιμάκωση, k-means/silhouette/DBSCAN/PCA, επιλογή προφίλ και
+  συμπεριφορά ανάλυσης, `Buckets`, `Cursor`, στατιστικά από sum/sum_sq.
+- **`ApiIntegrationTest` (11)** — πραγματική TimescaleDB σε container, ίδιο schema με την παραγωγή
+  (migrations από το `common`): ακριβή στατιστικά από τα συγκεντρωτικά, ωριαία άθροιση, `agg=avg|max`,
+  keyset που περπατά κάθε γραμμή **μία φορά**, και ότι η σύνδεση είναι όντως read-only.
+- **`IngestedRecordWriterIT` (6)** — το ένα statement γεμίζει τους τρεις πίνακες, τα διπλά
+  απορρίπτονται χωρίς να διπλομετρηθούν οι μετρικές, το CAGG βλέπει αμέσως τα δεδομένα, και μια
+  χαλασμένη γραμμή δεν ρίχνει το batch.
+- **`AnalyticsHttpIntegrationTest` (7)** — service-to-service μέσω **πραγματικού HTTP** (μικρός stub
+  server στη θέση του api-service): επιλογή προφίλ, ότι ζητούνται και μέσοι και αιχμές, ότι η κρυφή
+  αιχμή βρίσκεται μόνο χάρη στα max, και ότι το cache αποτρέπει τις επαναλαμβανόμενες κλήσεις.
+- **Στήσιμο Testcontainers:** στο 2.x τα artifacts λέγονται `testcontainers-postgresql` /
+  `testcontainers-junit-jupiter`, το BOM πρέπει να εισαχθεί ρητά, και χρειάζεται `commons-io`
+  (ο docker client το χρησιμοποιεί χωρίς να το κουβαλά). Η εικόνα δηλώνεται με
+  `asCompatibleSubstituteFor("postgres")`.
+
+## Τι βρήκαν τα integration tests (διορθωμένα)
+- **Το "read-only" του api-service ήταν διακοσμητικό.** Το `read-only: true` του Hikari και το
+  `readOnlyMode` του pgjdbc ισχύουν μόνο μέσα σε ρητό transaction· με autocommit οι INSERT
+  περνούσαν. Τώρα επιβάλλεται από τον server: `options=-c default_transaction_read_only=on` στο
+  JDBC URL, και το test κάνει INSERT και περιμένει άρνηση.
+- **`batchRows = 0` θα κολλούσε σε άπειρο βρόχο** (βήμα μηδέν). Μπήκε φρουρός με default 1000.
+- Προσοχή όταν προσθέτεις παραμέτρους σε JDBC URL μέσα σε test: το `getJdbcUrl()` του
+  Testcontainers μπορεί να φέρει ήδη `?`, και δεύτερο `?` αγνοείται σιωπηλά — το test θα
+  "περνούσε" για λάθος λόγο.
+
+## Τι έδωσε το πέρασμα απόδοσης (Β7α)
+Μετρημένα, στο ίδιο μηχάνημα και στα ίδια δεδομένα:
+
+| | Πριν | Μετά |
+|---|---|---|
+| Ανάλυση 700 κουβάδων (κρύα) | 960ms | **38ms** |
+| Φόρτωση σελίδας | 1012ms (3 requests) | **20ms** (1 request) |
+| `analyse()` καθαρός χρόνος υπολογισμού | 252ms | **8,8ms** |
+
+Τρία πράγματα το έκαναν:
+1. **Το cache δεν χτυπούσε ΠΟΤΕ.** Το `range=6h` σημαίνει «μέχρι τώρα», και το «τώρα» αλλάζει σε
+   κάθε χιλιοστό: κάθε request είχε άλλο κλειδί. Τώρα το τέλος του διαστήματος στρογγυλοποιείται
+   στα 30s (`TimeRange.GRAIN`, και το ίδιο στο api-service). **Μη το αφαιρέσεις.**
+2. **O(n² log n) στην ανίχνευση ανωμαλιών.** Η διάμεσος και το MAD κάθε πεδίου υπολογίζονταν
+   ΜΕΣΑ στον βρόχο των σημείων, δηλαδή δύο ταξινομήσεις 700 στοιχείων ανά σημείο ανά πεδίο.
+   Υπολογίζονται πλέον μία φορά έξω από τον βρόχο: 252ms → 8,8ms. Το ίδιο λάθος υπήρχε και στο
+   `GenericProfile`. **Αν προσθέσεις πεδίο στην ανάλυση, πρόσεχε το ίδιο μοτίβο.**
+3. **Ένα request αντί για τρία.** Το `/api/dashboard` μαζεύει analysis + matrix + rates + records
+   **παράλληλα** (virtual threads) και τα επιστρέφει μαζί: ο χρόνος είναι του πιο αργού, όχι το
+   άθροισμα. Το ίδιο και μέσα στην ανάλυση (μέσοι όροι και αιχμές παράλληλα).
+
+Μικρότερα: virtual threads σε όλα τα services (I/O-bound), gzip και στο ingestion, k-means με 4
+εκκινήσεις αντί 8 και ταβάνι 50 επαναλήψεων, αναζήτηση του k σε δείγμα 250 σημείων με πρόωρη
+διακοπή, και PCA που σταματά όταν συγκλίνει.
+
+**Τι ΔΕΝ προσθέσαμε και γιατί:** index φτιαγμένο στα μέτρα του keyset
+(`source_id, event_time DESC, topic, kafka_partition, kafka_offset`). Η μέτρηση έδειξε ότι η
+σελίδα 300 κάνει ήδη 4,2ms με το υπάρχον index, ενώ κάθε επιπλέον index κοστίζει σε **κάθε**
+insert — και το μονοπάτι εγγραφής είναι αυτό που μας νοιάζει για throughput.
+
+## Το UI (Β7β) και τι διορθώθηκε χάρη σε αυτό
+Μία σελίδα, ένα request (`/api/dashboard`), τοπικό ECharts. Το κεντρικό διάγραμμα δείχνει τρία
+πράγματα μαζί στον ίδιο άξονα χρόνου: τις μετρήσεις (κανονικοποιημένες), τις **ζώνες καθεστώτων**
+στο φόντο, και τις **ανωμαλίες** ως καρφίτσες· από κάτω η λωρίδα κατάταξης, με τα καθεστώτα
+χαμηλά και τα **συμβάντα** ψηλά και έντονα. Δίπλα: PCA scatter, ράνταρ ταυτότητας καθεστώτων,
+πίνακες καθεστώτων/ανωμαλιών (κλικ = εστίαση στον χρόνο), ωμές εγγραφές με cursor.
+
+Η επιθεώρηση του UI με screenshot (headless chromium) έβγαλε **έξι πραγματικά σφάλματα** που
+καμία μονάδα δοκιμής δεν έπιανε:
+1. **12 ώρες έδιναν 11 κουβάδες.** Η κλίμακα είχε μόνο 1m/1h/1d, άρα το 12ωρο έπεφτε από 720 σε
+   12. Προστέθηκαν **5m, 15m, 6h** (υπολογίζονται με `time_bucket` πάνω στο λεπτομερέστερο
+   συγκεντρωτικό — δεν χρειάστηκαν νέα views) και ο στόχος ανέβηκε στους 800 κουβάδες.
+2. **Λάθος ονόματα καθεστώτων.** Ο δείκτης φορτίου άθροιζε ΑΚΑΤΕΡΓΑΣΤΕΣ τιμές, οπότε ένα πεδίο σε
+   χιλιάδες (throughput) καθόριζε μόνο του τη σειρά: η ομάδα με χρήση 8% έβγαινε «πιο φορτωμένη»
+   από εκείνη με 96%. Τώρα κανονικοποιούνται πρώτα.
+3. **Τα κενά μετρούνταν ως μηδέν.** Πεδίο που λείπει από έναν κουβά γινόταν 0: έριχνε τη διάμεσο,
+   φούσκωνε τη διασπορά και εμφανιζόταν ως «ανωμαλία». Τώρα είναι `NaN`, τα `Stats` το αγνοούν,
+   και η ομαδοποίηση το συμπληρώνει με τη **διάμεσο του πεδίου**.
+4. **6 ομάδες σε 11 σημεία.** Το k περιορίζεται ώστε να αναλογούν ≥8 σημεία ανά ομάδα.
+5. **Η λωρίδα ήταν κομφετί** (141 εναλλαγές σε 608 κουβάδες): η κατάταξη έβγαινε αποκλειστικά από
+   ποσοστημόρια, που ταλαντώνονται στα όρια. Τώρα πατά στο **καθεστώς** (σταθερό εξ ορισμού) και
+   οι κανόνες μπαίνουν από πάνω· συν εξομάλυνση πλειοψηφίας 5 κουβάδων — με τις κατηγορίες
+   **συναγερμού εξαιρεμένες**, γιατί μια υποβάθμιση δύο κουβάδων είναι το σήμα, όχι θόρυβος.
+6. **Η «υποβάθμιση» χτυπούσε και σε χαμηλή καθυστέρηση**, επειδή συγκρίναμε `Math.abs(z)`.
+
+Επίσης: ο κουβάς που **ακόμα γεμίζει** κόβεται (αλλιώς κάθε γράφημα «βουτάει» στο τέλος), και το
+tooltip δείχνει πόσες μετρήσεις έχει ο κουβάς, σημειώνοντας τους αραιούς.
+
+**Έλεγχος UI:** `chromium --headless --screenshot` σε `localhost:8085` — ο μόνος τρόπος να
+φανούν τέτοια λάθη. Το JS ελέγχεται με `node --check`.
+
+## Το μονοπάτι εγγραφής υπό φορτίο (μετρημένο με 100.000 εγγραφές × 5 πεδία)
+| | Πριν | Μετά |
+|---|---|---|
+| Χαμένες εγγραφές | 2 στις 100.000 | **0** |
+| Deadlocks | ναι (με 6 threads) | **0** |
+| Από το POST μέχρι τη βάση | 39,3s | **21,0s** |
+| Ρυθμός | 2.544 εγγρ/s | **4.756 εγγρ/s** (28.534 γραμμές βάσης/s) |
+
+Τέσσερα πράγματα, όλα από μέτρηση υπό φορτίο — **καμία δεν φαινόταν σε unit test**:
+1. **Ο μεγάλος buffer έτρωγε δεδομένα.** Με `buffer-memory` 64MB χωρούσαν ~250.000 μηνύματα σε
+   αναμονή: δεχόμασταν πολύ περισσότερα απ' όσα προλάβαινε ο broker και μετά από 2 λεπτά το
+   `delivery.timeout.ms` τα ακύρωνε (*Expiring 2 record(s)… 120001 ms has passed*). Με **16MB**
+   το `send()` μπλοκάρει νωρίς και ο αναγνώστης επιβραδύνεται στον ρυθμό του broker — **το
+   μπλοκάρισμα ΕΙΝΑΙ το backpressure**. Μαζί, `max.block.ms` 60s: εδώ η αναμονή είναι σωστή.
+2. **Το jsonb ανοιγόταν δύο φορές** (μία για τα `metric_points`, μία για το `field_catalog`).
+   Τώρα ένα κοινό CTE `kv` το ανοίγει μία φορά και το μοιράζονται.
+3. **Deadlock στον κατάλογο.** Παράλληλοι consumers έκαναν upsert στις ίδιες γραμμές με
+   διαφορετική σειρά. Το `ORDER BY 1,2,3,4` πριν το `ON CONFLICT` το εξαφανίζει — **μη το
+   αφαιρέσεις**, φαίνεται μόνο υπό φορτίο.
+4. `concurrency` 3 → **6** (όσα τα partitions) και pool 8: η εγγραφή είναι αναμονή I/O, όχι CPU.
+
+## Απόδειξη κλίμακας (μετρημένη, 7.022.002 σημεία / 1,25 GB)
+Ο χρόνος απόκρισης **δεν μεγαλώνει με το εύρος**, γιατί μεγαλύτερο παράθυρο σημαίνει χοντρότερους
+κουβάδες: 12 ώρες = 49ms, 7 ημέρες = 62ms, 30 ημέρες = **43ms**, 60 ημέρες = **27ms** (πάντα
+240–720 σημεία). Στη βάση, το ίδιο ερώτημα 30 ημερών: **5,7ms** από το συγκεντρωτικό έναντι
+**280ms** από τα ωμά — 49x, και η διαφορά μεγαλώνει γραμμικά με τον όγκο. Σε 12 ώρες τα δύο
+είναι ισοδύναμα (13,8 έναντι 13,7ms): το κέρδος των συγκεντρωτικών φαίνεται στα ΜΕΓΑΛΑ παράθυρα.
+
+**Συμπίεση:** 274 MB → 16 MB (**94,1%**) στα ίδια δεδομένα, με τα ερωτήματα να δουλεύουν κανονικά
+πάνω στα συμπιεσμένα chunks (720 σημεία σε 43ms).
+
+Πώς να το ξανατρέξεις: γέμισε με `INSERT INTO metric_points SELECT ... FROM generate_series(...)`
+(η διαδρομή εισαγωγής μετριέται ξεχωριστά), μετά `CALL refresh_continuous_aggregate(...)` — θέλει
+~10 λεπτά για 6M σημεία — και `compress_chunk()` στα παλιά chunks. Καθάρισε μετά με
+`DELETE FROM metric_points WHERE source_id='scale-test'`.
+
+## Έλεγχοι υγείας που σημαίνουν κάτι
+Το `/actuator/health` έλεγε `UP` ακόμα κι όταν έλειπε η μοναδική εξάρτηση: απαντούσε για τη
+διεργασία, όχι για το αν μπορεί να κάνει τη δουλειά της. Τώρα, με `show-details: always`:
+- **ingestion** → `kafka` (clusterId, πλήθος brokers) και `db`
+- **api** → `db`
+- **analytics-ui** → `apiService` (url, πλήθος πηγών, latency σε ms)
+
+Δοκιμασμένο: με το api-service σβηστό, το analytics-ui γυρίζει **DOWN** με το σφάλμα μέσα, και
+επανέρχεται σε UP μόλις σηκωθεί.
+
+## Παρατηρησιμότητα: τι υπάρχει και πού
+- **Δύο dashboards** (provisioned, χωρίς κλικ): `datavortex` (εισαγωγή) και `datavortex-pipeline`
+  (**όλος ο σωλήνας**: lag, ρυθμοί στα τρία στάδια, καθυστερήσεις, cache hit ratio, προβλήματα).
+- **Κανόνες συναγερμού** στο `prometheus-rules.yml`: lag που ανεβαίνει, κολλημένος consumer,
+  υπηρεσία κάτω, μηνύματα στο DLQ, απορρίψεις βάσης, αργές εγγραφές, αργή ανάλυση. Δεν τρέχει
+  Alertmanager — οι κανόνες είναι η γραπτή τεκμηρίωση του «τι θεωρούμε πρόβλημα».
+- **Το cache hit ratio είναι μετρικό, όχι εικασία**: `cache_gets_total{result}`. Αν πέσει σε
+  σταθερό παράθυρο, το κλειδί του cache αλλάζει συνεχώς (δες τον κουαντισμό του χρόνου).
+
+## Μετρικές (Prometheus/Grafana)
+- `/actuator/prometheus` σε κάθε service. Το Prometheus (`prometheus.yml`) σκρέιπαρει και τα τρία
+  (8080 ingestion, 8082 api, 8085 analytics-ui)· όσα δεν τρέχουν φαίνονται DOWN, δεν πειράζει.
+- Σε Linux χρειάζεται `extra_hosts: host.docker.internal:host-gateway` στο prometheus, αλλιώς δεν βλέπει
+  τα Java services που τρέχουν έξω από το Docker.
+- Grafana στο `localhost:3000` (admin/admin). Το datasource και το dashboard είναι **provisioned**
+  (`grafana/provisioning/`, `grafana/dashboards/datavortex.json`) — δεν χρειάζεται κλικ.
+- Δικές μας μετρικές: `datavortex.ingest.records{mode,result}`, `datavortex.ingest.flush{mode}`,
+  `datavortex.consume.records{result}`, `datavortex.consume.batch.size`, `datavortex.db.insert`,
+  `datavortex.db.rows{result}`, `datavortex.kafka.consumer.lag` (σύνολο) και
+  `datavortex.kafka.consumer.lag.records{topic}` (ανά topic).
+- Προσοχή στα ονόματα στο Prometheus: ένα gauge που λέγεται `...lag.total` εξάγεται ως
+  `datavortex_kafka_consumer_lag` (το Micrometer κόβει το `_total` για να μη μοιάζει με counter),
+  και το `baseUnit("records")` προσθέτει `_records`.
+- **Το consumer lag είναι η μετρική-κλειδί.** Υπολογίζεται με AdminClient ανά 15s, και ΜΟΝΟ για topics
+  που ταιριάζουν στο pattern του consumer: παλιά committed offsets άλλων topics έδειχναν μόνιμο ψεύτικο lag.
+
+## Στυλ
+- Σχόλια και μηνύματα log στα ελληνικά (όπως ο υπάρχων κώδικας). Lombok `@Slf4j` όπου ήδη χρησιμοποιείται.
+- Μικρές, στοχευμένες αλλαγές· μην κάνεις reformat αρχείων (το `application.yaml` έχει ήδη ανεπιθύμητες αλλαγές indentation στο git).
+- Άλλαξες το `.proto` ή το mapping; Ενημέρωσε τα tests στο `src/test/.../mapping/` (`RecordMapperTest`, `ProtobufRegistryRoundTripTest` με mock registry, χωρίς Kafka).
