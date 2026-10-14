@@ -38,6 +38,12 @@ public class WeatherProfile implements DataProfile {
     /** Κάτω από τόσα δείγματα, μια ώρα της ημέρας δεν φτιάχνει βάση σύγκρισης. */
     private static final int MIN_SAMPLES_PER_HOUR = 3;
 
+    /**
+     * Πόσο του παραθύρου πρέπει να καλύπτει ένα φαινόμενο για να χαρακτηρίσει ολόκληρο τον κουβά
+     * (ως λόγος μέσου προς αιχμή). Το ένα τρίτο: λιγότερο ήταν μια μπόρα, όχι βροχερό εξάωρο.
+     */
+    private static final double SUSTAINED_SHARE = 0.34;
+
     /** Παράθυρο εξομάλυνσης της κατάταξης· σβήνει τα μεμονωμένα αναπηδήματα. */
     private static final int SMOOTHING = 5;
 
@@ -120,6 +126,8 @@ public class WeatherProfile implements DataProfile {
         double[] temps = centroids.stream().mapToDouble(c -> value(c, temp)).toArray();
         double warm = temps.length > 0 ? Stats.quantile(temps, 0.66) : 0;
         double cool = temps.length > 0 ? Stats.quantile(temps, 0.33) : 0;
+        double[] rains = centroids.stream().mapToDouble(c -> value(c, rain)).toArray();
+        double[] winds = centroids.stream().mapToDouble(c -> value(c, wind)).toArray();
 
         List<String> labels = new ArrayList<>();
         for (Map<String, Double> centroid : centroids) {
@@ -127,9 +135,9 @@ public class WeatherProfile implements DataProfile {
             double r = value(centroid, rain);
             double h = value(centroid, humidity);
             double w = value(centroid, wind);
-            if (rain != null && r >= RAIN_INTENSITY) {
+            if (rain != null && r >= RAIN_INTENSITY && standsOut(r, rains)) {
                 labels.add("βροχερό");
-            } else if (wind != null && w > WINDY_AVG) {
+            } else if (wind != null && w > WINDY_AVG && standsOut(w, winds)) {
                 labels.add("ανεμώδες");
             } else if (t >= warm && (humidity == null || h < 55)) {
                 labels.add("ζεστό και ξηρό");
@@ -142,6 +150,24 @@ public class WeatherProfile implements DataProfile {
             }
         }
         return dedupe(labels);
+    }
+
+    /**
+     * Ξεχωρίζει αυτή η τιμή από τις υπόλοιπες ομάδες;
+     * <p>
+     * Το όνομα μιας ομάδας πρέπει να λέει <b>τι την κάνει διαφορετική</b>, όχι απλώς τι έχει. Με
+     * σκέτο απόλυτο κατώφλι, ένα σύνολο όπου ψιχαλίζει παντού έβγαζε «βροχερό 1» και «βροχερό 2»:
+     * αληθές, άχρηστο, και κρύβει ότι η μία ομάδα ήταν ζεστή και η άλλη ψυχρή. Ίδιο λάθος με τα
+     * απόλυτα κατώφλια πάνω σε αιχμές — απλώς σε άλλη θέση.
+     * <p>
+     * Το 1,5x πάνω από τη διάμεσο των ομάδων είναι αρκετό για να μη χαρακτηρίζονται όλες ίδιες,
+     * και αρκετά χαμηλό ώστε μια πραγματικά βροχερή ομάδα να ξεχωρίζει.
+     */
+    private static boolean standsOut(double value, double[] all) {
+        if (all.length < 2) {
+            return true; // μία ομάδα: δεν υπάρχει κάτι από το οποίο να ξεχωρίσει
+        }
+        return value >= Stats.quantile(all, 0.5) * 1.5;
     }
 
     /** Δύο ομάδες με το ίδιο όνομα μπερδεύουν· προσθέτουμε αρίθμηση μόνο όπου χρειάζεται. */
@@ -191,17 +217,21 @@ public class WeatherProfile implements DataProfile {
         double[] rain = column(input, roles, FieldRoles.RAIN);
         double[] wind = column(input, roles, FieldRoles.WIND);
         double[] humidity = column(input, roles, FieldRoles.HUMIDITY);
+        // Και οι αιχμές, όχι για να συγκριθούν με κατώφλι αλλά για να φανεί αν το φαινόμενο
+        // κράτησε όσο ο κουβάς ή ήταν μια στιγμή μέσα του — δες sustained().
+        double[] rainPeak = peakColumn(input, roles, FieldRoles.RAIN);
+        double[] windPeak = peakColumn(input, roles, FieldRoles.WIND);
 
         List<String> classes = new ArrayList<>(input.size());
         for (int i = 0; i < input.size(); i++) {
             double t = at(temp, i);
-            if (rain != null && at(rain, i) >= RAIN_INTENSITY) {
+            if (rain != null && at(rain, i) >= RAIN_INTENSITY && sustained(at(rain, i), at(rainPeak, i))) {
                 classes.add("βροχή");
             } else if (temp != null && t >= 35) {
                 classes.add("καύσωνας");
             } else if (temp != null && t <= 5) {
                 classes.add("ψύχος");
-            } else if (wind != null && at(wind, i) >= WINDY_AVG) {
+            } else if (wind != null && at(wind, i) >= WINDY_AVG && sustained(at(wind, i), at(windPeak, i))) {
                 classes.add("άνεμος");
             } else if (humidity != null && at(humidity, i) >= 85) {
                 classes.add("υγρασία");
@@ -401,6 +431,30 @@ public class WeatherProfile implements DataProfile {
 
     private static double[] column(Input input, Map<String, FieldRoles> roles, FieldRoles role) {
         return FieldRoles.first(roles, role).map(input::column).orElse(null);
+    }
+
+    private static double[] peakColumn(Input input, Map<String, FieldRoles> roles, FieldRoles role) {
+        return FieldRoles.first(roles, role).map(input::peakColumn).orElse(null);
+    }
+
+    /**
+     * Κράτησε το φαινόμενο όσο ο κουβάς, ή ήταν μια στιγμή μέσα του;
+     * <p>
+     * <b>Το μετρημένο πρόβλημα:</b> σε κουβά 6 ωρών, μία ώρα με 2,4 mm βροχής δίνει μέσο όρο
+     * 0,4 mm — πάνω από κάθε κατώφλι ψιχάλας. Στα ίδια δεδομένα, βροχή πάνω από το κατώφλι είχε
+     * το <b>30%</b> των ωριαίων μετρήσεων αλλά το <b>96%</b> των εξάωρων κουβάδων, και το UI
+     * ανακοίνωνε «επικρατεί βροχή στο 98% του χρόνου». Ο μέσος όρος δεν κρύβει μόνο αιχμές
+     * (γνωστή παγίδα) — <b>εξαπλώνει</b> και ένα στιγμιαίο γεγονός σε όλο το παράθυρο.
+     * <p>
+     * Ο λόγος μέσου προς αιχμή το ξεχωρίζει χωρίς να χρειάζεται νέα δεδομένα: κοντά στο 1
+     * σημαίνει σταθερό φαινόμενο, κοντά στο 0 μια στιγμή. Οι στιγμιαίες αιχμές δεν χάνονται —
+     * εμφανίζονται ως <b>ανωμαλίες</b>, όπου η σύγκριση γίνεται αιχμή με αιχμή.
+     */
+    private static boolean sustained(double average, double peak) {
+        if (Double.isNaN(peak) || peak <= 0) {
+            return true; // χωρίς αιχμές δεν έχουμε λόγο να αμφιβάλλουμε για τον μέσο
+        }
+        return average >= peak * SUSTAINED_SHARE;
     }
 
 

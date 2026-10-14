@@ -188,6 +188,55 @@ class AnalysisBehaviourTest {
         assertTrue(analysis.classes().stream().anyMatch(c -> c.className().equals("βροχή")));
     }
 
+    @Test
+    void weatherSeparatesASteadyDrizzleFromAPassingShower() {
+        // Ίδιος μέσος όρος, εντελώς διαφορετικός καιρός: αριστερά βρέχει σταθερά όλο το εξάωρο,
+        // δεξιά έπεσε μια μπόρα μισής ώρας. Με μόνο τον μέσο, και τα δύο έβγαιναν «βροχή» — έτσι
+        // το 30% των ωριαίων μετρήσεων γινόταν 96% των κουβάδων και το UI ανακοίνωνε «βροχή 98%».
+        List<String> fields = List.of("TempC", "RainMm");
+        List<Map<String, Double>> steadyAvg = new ArrayList<>();
+        List<Map<String, Double>> steadyPeak = new ArrayList<>();
+        List<Map<String, Double>> burstAvg = new ArrayList<>();
+        List<Map<String, Double>> burstPeak = new ArrayList<>();
+        for (int i = 0; i < 30; i++) {
+            steadyAvg.add(row("TempC", 18.0 + i % 3, "RainMm", 0.4));
+            steadyPeak.add(row("TempC", 19.0 + i % 3, "RainMm", 0.5));   // λόγος 0,80 — σταθερό
+            burstAvg.add(row("TempC", 18.0 + i % 3, "RainMm", 0.4));
+            burstPeak.add(row("TempC", 19.0 + i % 3, "RainMm", 5.0));    // λόγος 0,08 — στιγμιαίο
+        }
+        Analysis steady = new WeatherProfile()
+                .analyse(input(fields, steadyAvg, steadyPeak, Duration.ofHours(6)));
+        Analysis burst = new WeatherProfile()
+                .analyse(input(fields, burstAvg, burstPeak, Duration.ofHours(6)));
+
+        assertTrue(steady.classes().stream().anyMatch(c -> c.className().equals("βροχή")),
+                "σταθερή βροχή πρέπει να χαρακτηρίζει τον κουβά: " + steady.classes());
+        assertTrue(burst.classes().stream().noneMatch(c -> c.className().equals("βροχή")),
+                "μια μπόρα δεν κάνει βροχερό εξάωρο: " + burst.classes());
+    }
+
+    @Test
+    void weatherDoesNotCallEveryRegimeRainyWhenItDrizzlesEverywhere() {
+        // Ψιχάλα παντού, αλλά η μία ομάδα είναι ζεστή και η άλλη ψυχρή. Με απόλυτο κατώφλι και
+        // μόνο, και οι δύο έβγαιναν «βροχερό 1» και «βροχερό 2»: αληθές, άχρηστο, και κρύβει
+        // ακριβώς αυτό που τις ξεχωρίζει.
+        List<String> fields = List.of("TempC", "RainMm", "Humidity");
+        List<Map<String, Double>> rows = new ArrayList<>();
+        for (int i = 0; i < 40; i++) {
+            boolean cold = i >= 20;
+            rows.add(row("TempC", cold ? 8.0 + i % 2 : 28.0 + i % 2,
+                    "RainMm", 0.4 + (i % 3) * 0.02,
+                    "Humidity", cold ? 70.0 : 45.0));
+        }
+        Analysis analysis = new WeatherProfile().analyse(input(fields, rows, Duration.ofHours(1)));
+
+        List<String> labels = analysis.clusters().stream().map(Analysis.Cluster::label).toList();
+        assertTrue(labels.stream().noneMatch(l -> l.startsWith("βροχερό")),
+                "καμία ομάδα δεν ξεχωρίζει στη βροχή, άρα το όνομα πρέπει να λέει κάτι άλλο: " + labels);
+        assertEquals(labels.size(), labels.stream().distinct().count(),
+                "τα ονόματα πρέπει να διαφέρουν μεταξύ τους: " + labels);
+    }
+
     // ---------------------------------------------------------------- γενικό
 
     @Test
