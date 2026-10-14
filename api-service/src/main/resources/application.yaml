@@ -3,7 +3,11 @@ spring:
     name: datavortex-api
 
   datasource:
-    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:bigdata_db}
+    # Το read-only επιβάλλεται από τον SERVER, όχι από τον driver: το "read-only" του pool και
+    # το readOnlyMode του pgjdbc ισχύουν μόνο μέσα σε ρητό transaction, άρα με autocommit οι
+    # εγγραφές περνούσαν κανονικά (το βρήκε το integration test). Με default_transaction_read_only
+    # στη σύνδεση, κάθε απόπειρα εγγραφής από αυτό το service απορρίπτεται από την Postgres.
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:bigdata_db}?options=-c%20default_transaction_read_only%3Don
     username: ${DB_USER:postgres}
     password: ${DB_PASS:postgres}
     hikari:

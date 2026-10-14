@@ -79,6 +79,8 @@ public class IngestedRecordWriter {
             .omittingInsignificantWhitespace()
             .includingDefaultValueFields();
 
+    private static final int DEFAULT_BATCH_ROWS = 1000;
+
     private final JdbcTemplate jdbc;
     private final Timer insertTimer;
     private final Counter rowsWritten;
@@ -132,8 +134,11 @@ public class IngestedRecordWriter {
         }
         int written = 0;
         long started = System.nanoTime();
-        for (int start = 0; start < rows.size(); start += batchRows) {
-            List<Row> chunk = rows.subList(start, Math.min(start + batchRows, rows.size()));
+        // Φρουρός: με batchRows <= 0 (π.χ. αν λείψει η ρύθμιση) το βήμα θα ήταν μηδέν και ο
+        // βρόχος θα έτρεχε για πάντα.
+        int step = batchRows > 0 ? batchRows : DEFAULT_BATCH_ROWS;
+        for (int start = 0; start < rows.size(); start += step) {
+            List<Row> chunk = rows.subList(start, Math.min(start + step, rows.size()));
             written += writeChunk(chunk);
         }
         insertTimer.record(System.nanoTime() - started, java.util.concurrent.TimeUnit.NANOSECONDS);

@@ -88,6 +88,14 @@
 			<artifactId>testcontainers-junit-jupiter</artifactId>
 			<scope>test</scope>
 		</dependency>
+		<!-- Το Testcontainers 2.x χρησιμοποιεί commons-io στο docker-java client αλλά δεν το
+		     κουβαλά: χωρίς αυτό σκάει NoClassDefFoundError στο πρώτο docker call. -->
+		<dependency>
+			<groupId>commons-io</groupId>
+			<artifactId>commons-io</artifactId>
+			<version>2.20.0</version>
+			<scope>test</scope>
+		</dependency>
 
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
