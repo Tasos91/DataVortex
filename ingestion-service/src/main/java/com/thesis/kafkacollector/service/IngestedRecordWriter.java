@@ -55,18 +55,27 @@ public class IngestedRecordWriter {
     private static final String INSERT_SUFFIX = """
             \n    ON CONFLICT DO NOTHING
                 RETURNING event_time, source_id, topic, fields
+            ), kv AS (
+                -- Το jsonb ανοίγεται ΜΙΑ φορά και το αποτέλεσμα το μοιράζονται και οι δύο
+                -- επόμενοι πίνακες. Με δύο ξεχωριστά jsonb_each η ανάλυση του jsonb γινόταν
+                -- διπλή, και είναι το ακριβότερο κομμάτι της εγγραφής.
+                SELECT i.event_time, i.source_id, i.topic,
+                       f.key AS field, f.value AS value, jsonb_typeof(f.value) AS json_type
+                FROM ins i, jsonb_each(i.fields) f
             ), mp AS (
                 INSERT INTO metric_points (event_time, source_id, topic, field, value)
-                SELECT i.event_time, i.source_id, i.topic, f.key, (f.value #>> '{}')::double precision
-                FROM ins i, jsonb_each(i.fields) f
-                WHERE jsonb_typeof(f.value) = 'number'
+                SELECT event_time, source_id, topic, field, (value #>> '{}')::double precision
+                FROM kv WHERE json_type = 'number'
                 RETURNING 1
             ), cat AS (
                 INSERT INTO field_catalog (source_id, topic, field, json_type, n, first_seen, last_seen)
-                SELECT i.source_id, i.topic, f.key, jsonb_typeof(f.value),
-                       count(*), min(i.event_time), max(i.event_time)
-                FROM ins i, jsonb_each(i.fields) f
+                SELECT source_id, topic, field, json_type, count(*), min(event_time), max(event_time)
+                FROM kv
                 GROUP BY 1, 2, 3, 4
+                -- ΣΤΑΘΕΡΗ ΣΕΙΡΑ, όχι διακόσμηση: χωρίς αυτήν, παράλληλοι consumers κλειδώνουν
+                -- τις ίδιες γραμμές του καταλόγου με διαφορετική σειρά και η Postgres ανιχνεύει
+                -- deadlock. Φάνηκε μόνο υπό φορτίο, με 6 threads και 100.000 εγγραφές.
+                ORDER BY 1, 2, 3, 4
                 ON CONFLICT (source_id, topic, field, json_type) DO UPDATE
                     SET n = field_catalog.n + EXCLUDED.n,
                         first_seen = least(field_catalog.first_seen, EXCLUDED.first_seen),
