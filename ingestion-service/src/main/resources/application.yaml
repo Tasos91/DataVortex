@@ -17,7 +17,7 @@
       password: ${DB_PASS:postgres}
       hikari:
         # Ένα connection ανά consumer thread (concurrency) και ένα για το Flyway/υπόλοιπα
-        maximum-pool-size: ${DB_POOL_SIZE:6}
+        maximum-pool-size: ${DB_POOL_SIZE:8} # ένα ανά consumer thread, συν εφεδρεία
 
     # Το schema το φτιάχνει το Flyway (db/migration), ΟΧΙ το Hibernate: ο πίνακας είναι
     # TimescaleDB hypertable με συμπίεση, πράγματα που το ddl-auto δεν ξέρει να φτιάξει
@@ -78,7 +78,9 @@
               startOffset: earliest # <-- Αυτό ξυπνάει το earliest στο Cloud Stream
               useNativeDecoding: true
               batch-mode: true      # List<...> ανά poll, ώστε να γίνονται batch inserts
-              concurrency: ${CONSUMER_CONCURRENCY:3} # να είναι <= τα partitions του topic
+              # Όσα και τα partitions: η εγγραφή στη βάση είναι αναμονή I/O, όχι CPU, άρα
+              # περισσότερα threads γράφουν παράλληλα χωρίς να μαλώνουν για τους 4 πυρήνες.
+              concurrency: ${CONSUMER_CONCURRENCY:6}
 
     # ----------------------------------------------------
     # 4. Standard Kafka Properties (Για Producer & @KafkaListener Consumer)
@@ -93,12 +95,18 @@
         # --- ΠΡΟΣΘΗΚΕΣ & ΑΛΛΑΓΕΣ ΓΙΑ BIG DATA STREAMING ---
         compression-type: lz4                                # Σώζει bandwidth, ιδανικό για JSON/CSV
         batch-size: ${KAFKA_BATCH_SIZE:65536}                # Αλλάξαμε το default από 16384 (16KB) σε 65536 (64KB)
-        buffer-memory: ${KAFKA_BUFFER_MEMORY:67108864}       # 64MB (προστατεύει από OutOfMemory αν το Kafka καθυστερεί)
+        # ΜΙΚΡΟΣ buffer επίτηδες. Με 64MB χωρούσαν ~250.000 μηνύματα σε αναμονή: δεχόμασταν πολύ
+        # περισσότερα απ' όσα προλάβαινε να γράψει ο broker, και μετά από 2 λεπτά αναμονής το
+        # delivery.timeout.ms τα ΑΚΥΡΩΝΕ ("Expiring 2 record(s)... 120001 ms has passed").
+        # Με 16MB το send() μπλοκάρει νωρίς, ο αναγνώστης επιβραδύνεται στον ρυθμό του broker,
+        # και δεν χάνεται τίποτα: το μπλοκάρισμα ΕΙΝΑΙ το backpressure.
+        buffer-memory: ${KAFKA_BUFFER_MEMORY:16777216}       # 16MB
         properties:
           schema.registry.url: ${SCHEMA_REGISTRY_URL:http://localhost:8081}
-          # Αν γεμίσει το buffer-memory, το send() μπλοκάρει· 10s αντί για 60s (default),
-          # ώστε το HTTP request να απαντά με σφάλμα και να μη κρεμάει το thread.
-          max.block.ms: ${KAFKA_MAX_BLOCK_MS:10000}
+          # Πόσο περιμένει το send() όταν ο buffer είναι γεμάτος. Γενναιόδωρο επίτηδες: εδώ η
+          # αναμονή είναι το ζητούμενο (backpressure), όχι σφάλμα. Ο νεκρός broker πιάνεται
+          # νωρίτερα από τον έλεγχο ύπαρξης topic, που απαντά 400/503 σε λίγα χιλιοστά.
+          max.block.ms: ${KAFKA_MAX_BLOCK_MS:60000}
           linger.ms: ${KAFKA_LINGER_MS:5}                    # Αλλάξαμε το 0 σε 5ms για να προλαβαίνει να γεμίσει το batch
 
       consumer:
