@@ -13,19 +13,7 @@ TimescaleDB (και τροφοδοτεί ένα απλό dashboard).
       `analytics-ui-service` (σκελετός). Τα δύο τελευταία γεμίζουν στα Β4/Β5.
 - [x] **Β4 api-service** — read-only REST, continuous aggregates, keyset pagination, cache, ETag.
 - [x] **Β5 analytics-ui-service** — UI, 3 προφίλ ανάλυσης, ML πυρήνας χωρίς εξαρτήσεις, 40 unit tests.
-- [ ] **Β6 integration tests** — ΞΕΚΙΝΗΣΕ, ημιτελές. ΕΓΙΝΑΝ: τα migrations μετακόμισαν στο `common`
-      (ταξιδεύουν με το jar, ώστε ingestion και tests να χτίζουν το ΙΔΙΟ schema — επαληθεύτηκε ότι
-      το Flyway τα βρίσκει από το jar), και μπήκαν τα testcontainers deps + BOM στο parent.
-      ΠΡΟΣΟΧΗ: στο Testcontainers 2.x τα artifacts λέγονται `testcontainers-postgresql` και
-      `testcontainers-junit-jupiter` (όχι `postgresql`/`junit-jupiter`), και το Boot ορίζει την
-      έκδοση αλλά ΔΕΝ εισάγει το BOM.
-      ΜΕΝΟΥΝ να γραφτούν: (1) `api-service`: Testcontainers με `timescale/timescaledb:2.30.2-pg17`
-      (`asCompatibleSubstituteFor("postgres")`) + Flyway + MockMvc — έλεγχος /sources, /series
-      (avg/stddev από sum,sum_sq), /matrix με agg=avg|max, και keyset που περπατά σελίδες χωρίς
-      κενά ή επαναλήψεις· (2) `ingestion-service`: ο writer σε πραγματική βάση — τα 3 tables με ένα
-      statement, απόρριψη διπλών, και ότι το CAGG δείχνει τα δεδομένα· (3) `analytics-ui-service`:
-      στήσιμο μικρού HTTP stub (JDK HttpServer) στο `datavortex.api-base-url` και έλεγχος ότι η
-      ανάλυση περνά σωστά όλο το HTTP συμβόλαιο.
+- [x] **Β6 integration tests** — 24 integration tests σε 3 επίπεδα, συν 59 unit = **83 συνολικά**.
 - [ ] **Β7 τελικό πέρασμα βελτιστοποίησης** — απόδοση, αρχιτεκτονική, UX.
 
 ## Εντολές (το μηχάνημα έχει αργή CPU, 4 πυρήνες: τρέχε το ελάχιστο)
@@ -230,6 +218,34 @@ UI μιας σελίδας (`static/index.html`, vanilla JS + τοπικό EChar
 - **Η ομαδοποίηση αφορά χρονικά παράθυρα, όχι μεμονωμένες εγγραφές.** Αν δύο πληθυσμοί
   εναλλάσσονται μέσα στον ίδιο κουβά, ο μέσος όρος τους τους εξαφανίζει. Βρίσκει *καθεστώτα* στον
   χρόνο — που είναι και ο λόγος που δεν αργεί ποτέ.
+
+## Tests (83, όλα περνούν)
+- `./mvnw -q test` τρέχει τα πάντα· τα IT με Testcontainers θέλουν Docker και ~15s ανά κλάση.
+- **Unit (59):** στατιστικά, κλιμάκωση, k-means/silhouette/DBSCAN/PCA, επιλογή προφίλ και
+  συμπεριφορά ανάλυσης, `Buckets`, `Cursor`, στατιστικά από sum/sum_sq.
+- **`ApiIntegrationTest` (11)** — πραγματική TimescaleDB σε container, ίδιο schema με την παραγωγή
+  (migrations από το `common`): ακριβή στατιστικά από τα συγκεντρωτικά, ωριαία άθροιση, `agg=avg|max`,
+  keyset που περπατά κάθε γραμμή **μία φορά**, και ότι η σύνδεση είναι όντως read-only.
+- **`IngestedRecordWriterIT` (6)** — το ένα statement γεμίζει τους τρεις πίνακες, τα διπλά
+  απορρίπτονται χωρίς να διπλομετρηθούν οι μετρικές, το CAGG βλέπει αμέσως τα δεδομένα, και μια
+  χαλασμένη γραμμή δεν ρίχνει το batch.
+- **`AnalyticsHttpIntegrationTest` (7)** — service-to-service μέσω **πραγματικού HTTP** (μικρός stub
+  server στη θέση του api-service): επιλογή προφίλ, ότι ζητούνται και μέσοι και αιχμές, ότι η κρυφή
+  αιχμή βρίσκεται μόνο χάρη στα max, και ότι το cache αποτρέπει τις επαναλαμβανόμενες κλήσεις.
+- **Στήσιμο Testcontainers:** στο 2.x τα artifacts λέγονται `testcontainers-postgresql` /
+  `testcontainers-junit-jupiter`, το BOM πρέπει να εισαχθεί ρητά, και χρειάζεται `commons-io`
+  (ο docker client το χρησιμοποιεί χωρίς να το κουβαλά). Η εικόνα δηλώνεται με
+  `asCompatibleSubstituteFor("postgres")`.
+
+## Τι βρήκαν τα integration tests (διορθωμένα)
+- **Το "read-only" του api-service ήταν διακοσμητικό.** Το `read-only: true` του Hikari και το
+  `readOnlyMode` του pgjdbc ισχύουν μόνο μέσα σε ρητό transaction· με autocommit οι INSERT
+  περνούσαν. Τώρα επιβάλλεται από τον server: `options=-c default_transaction_read_only=on` στο
+  JDBC URL, και το test κάνει INSERT και περιμένει άρνηση.
+- **`batchRows = 0` θα κολλούσε σε άπειρο βρόχο** (βήμα μηδέν). Μπήκε φρουρός με default 1000.
+- Προσοχή όταν προσθέτεις παραμέτρους σε JDBC URL μέσα σε test: το `getJdbcUrl()` του
+  Testcontainers μπορεί να φέρει ήδη `?`, και δεύτερο `?` αγνοείται σιωπηλά — το test θα
+  "περνούσε" για λάθος λόγο.
 
 ## Μετρικές (Prometheus/Grafana)
 - `/actuator/prometheus` σε κάθε service. Το Prometheus (`prometheus.yml`) σκρέιπαρει και τα τρία
