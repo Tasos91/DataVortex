@@ -5,11 +5,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.thesis.kafkacollector.csv.CsvInspector;
 import com.thesis.kafkacollector.csv.CsvPlan;
 import com.thesis.kafkacollector.dto.IngestionRequest;
-import com.thesis.kafkacollector.mapping.RecordMapper;
+import com.thesis.kafkacollector.mapping.Mappings;
 import com.thesis.kafkacollector.proto.IngestedRecordProto;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
 import java.io.BufferedReader;
@@ -20,7 +19,6 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
 
 @Service
 public class FileStreamingService {
@@ -28,16 +26,17 @@ public class FileStreamingService {
     private static final Logger log = LoggerFactory.getLogger(FileStreamingService.class);
 
     // Το KafkaProtobufSerializer γράφει το schema στο Schema Registry και στέλνει το record με το schema id
-    private final KafkaTemplate<String, IngestedRecordProto.IngestedRecord> kafkaTemplate;
+    private final RecordSender sender;
     private final KafkaTopicService topicService;
     private final CsvIngestService csvService;
     private final IngestMeters meters;
     private final ObjectMapper objectMapper = new ObjectMapper();
+    /** Ένας reader αντί για τον ObjectMapper στον βρόχο: ο mapper κάνει αναζήτηση ρυθμίσεων κάθε φορά. */
+    private final com.fasterxml.jackson.databind.ObjectReader jsonReader = objectMapper.reader();
 
-    public FileStreamingService(KafkaTemplate<String, IngestedRecordProto.IngestedRecord> kafkaTemplate,
-                                KafkaTopicService topicService, CsvIngestService csvService,
-                                IngestMeters meters) {
-        this.kafkaTemplate = kafkaTemplate;
+    public FileStreamingService(RecordSender sender, KafkaTopicService topicService,
+                                CsvIngestService csvService, IngestMeters meters) {
+        this.sender = sender;
         this.topicService = topicService;
         this.csvService = csvService;
         this.meters = meters;
@@ -113,21 +112,21 @@ public class FileStreamingService {
      */
     public IngestResult processPayload(IngestionRequest request) throws Exception {
         JsonNode root = objectMapper.valueToTree(request.getPayload());
-        Map<String, String> mappings = request.getFieldMappings();
+        Mappings mappings = compile(request);
         String topic = topicService.resolve(request.getTopic(), request.isCreateTopicIfMissing(), request.getPartitions());
-        AtomicInteger failed = new AtomicInteger();
+        RecordSender.Session session = sender.open(topic);
         int read = 0;
 
         if (root.isArray()) {
             for (JsonNode element : root) {
-                send(topic, request, element, mappings, failed);
+                send(session, request, element, mappings);
                 read++;
             }
         } else {
-            send(topic, request, root, mappings, failed);
+            send(session, request, root, mappings);
             read++;
         }
-        return meters.finish(topic, "payload", read, read, 0, failed);
+        return meters.finish("payload", read, read, 0, session);
     }
 
     /**
@@ -142,9 +141,8 @@ public class FileStreamingService {
      */
     public IngestResult processNdjson(InputStream body) throws Exception {
         IngestionRequest config = null;
-        String topic = null;
-        Map<String, String> mappings = null;
-        AtomicInteger failed = new AtomicInteger();
+        RecordSender.Session session = null;
+        Mappings mappings = null;
         int read = 0;
         int skipped = 0;
 
@@ -156,13 +154,15 @@ public class FileStreamingService {
                 }
                 if (config == null) {
                     config = objectMapper.readValue(line, IngestionRequest.class);
-                    topic = topicService.resolve(config.getTopic(), config.isCreateTopicIfMissing(), config.getPartitions());
-                    mappings = config.getFieldMappings();
+                    String topic = topicService.resolve(config.getTopic(), config.isCreateTopicIfMissing(),
+                            config.getPartitions());
+                    session = sender.open(topic);
+                    mappings = compile(config);
                     log.info("NDJSON: ξεκινά εισαγωγή στο topic {} (sourceId {})", topic, config.getSourceId());
                     continue;
                 }
                 try {
-                    send(topic, config, objectMapper.readTree(line), mappings, failed);
+                    send(session, config, jsonReader.readTree(line), mappings);
                     read++;
                 } catch (Exception e) {
                     skipped++;
@@ -174,13 +174,13 @@ public class FileStreamingService {
             throw new IllegalArgumentException("Το σώμα είναι κενό. Η πρώτη γραμμή πρέπει να έχει τις "
                     + "ρυθμίσεις (sourceId, topic, keyField, fieldMappings) και οι επόμενες τις εγγραφές.");
         }
-        return meters.finish(topic, "ndjson", read + skipped, read, skipped, failed);
+        return meters.finish("ndjson", read + skipped, read, skipped, session);
     }
 
     public IngestResult processJsonStream(IngestionRequest request) throws Exception {
-        Map<String, String> mappings = request.getFieldMappings();
+        Mappings mappings = compile(request);
         String topic = topicService.resolve(request.getTopic(), request.isCreateTopicIfMissing(), request.getPartitions());
-        AtomicInteger failed = new AtomicInteger();
+        RecordSender.Session session = sender.open(topic);
         log.info("Ξεκινάει η επεξεργασία JSON αρχείου: {}", request.getFilePath());
         log.info("Στόχος Kafka Topic: {}", topic);
 
@@ -202,7 +202,7 @@ public class FileStreamingService {
                 if (token == com.fasterxml.jackson.core.JsonToken.START_OBJECT) {
                     // ΕΣΩΤΕΡΙΚΟ TRY-CATCH
                     try {
-                        send(topic, request, objectMapper.readTree(parser), mappings, failed);
+                        send(session, request, objectMapper.readTree(parser), mappings);
                         read++;
 
                     } catch (Exception e) {
@@ -213,31 +213,26 @@ public class FileStreamingService {
                 token = parser.nextToken();
             }
         }
-        return meters.finish(topic, "json-file", read + skipped, read, skipped, failed);
+        return meters.finish("json-file", read + skipped, read, skipped, session);
     }
 
     /**
-     * Χτίζει το Protobuf record και το στέλνει. Το κλειδί βγαίνει από το keyField του request:
-     * ίδιο κλειδί σημαίνει ίδιο partition, άρα εγγυημένη σειρά για την ίδια οντότητα.
-     * Χωρίς keyField το κλειδί είναι null και τα μηνύματα μοιράζονται σε όλα τα partitions.
+     * Χτίζει το Protobuf record και το στέλνει.
+     * <p>
+     * Οι διαδρομές είναι ήδη μεταγλωττισμένες ({@link Mappings}), άρα εδώ δεν γίνεται καμία
+     * ανάλυση κειμένου. Ο ωμός παλμός JSON γράφεται <b>μόνο</b> αν τον ζήτησε ο χρήστης: η
+     * επανασειριοποίηση ολόκληρου του κόμβου σε κάθε εγγραφή ήταν δουλειά που πληρωνόταν πάντα,
+     * για κάτι που σχεδόν ποτέ δεν διαβάζεται.
      */
-    private void send(String topic, IngestionRequest request, JsonNode node, Map<String, String> mappings,
-                      AtomicInteger failed) throws Exception {
-        IngestedRecordProto.IngestedRecord record = RecordMapper.map(
-                request.getSourceId(), objectMapper.writeValueAsString(node), node, mappings);
-        String key = RecordMapper.keyOf(node, request.getKeyField());
-        Long eventTime = RecordMapper.eventTimeOf(node, request.getTimeField());
+    private void send(RecordSender.Session session, IngestionRequest request, JsonNode node, Mappings mappings)
+            throws Exception {
+        String payloadJson = request.isStoreRawPayload() ? objectMapper.writeValueAsString(node) : null;
+        session.send(mappings.eventTimeOf(node), mappings.keyOf(node),
+                mappings.toRecord(request.getSourceId(), node, payloadJson));
+    }
 
-        // Ο χρόνος του μηνύματος στο Kafka γίνεται event_time στη βάση. Με timeField μπορούμε
-        // να φορτώσουμε ιστορικά δεδομένα με τον σωστό τους χρόνο (backfill).
-        var producerRecord = new org.apache.kafka.clients.producer.ProducerRecord<>(
-                topic, null, eventTime, key, record);
-        kafkaTemplate.send(producerRecord).whenComplete((result, ex) -> {
-            if (ex != null) {
-                failed.incrementAndGet();
-                log.error("Αποτυχία αποστολής στο Kafka (topic {}, sourceId {}): {}",
-                        topic, request.getSourceId(), ex.getMessage());
-            }
-        });
+    /** Οι διαδρομές του request, αναλυμένες μία φορά πριν την πρώτη εγγραφή. */
+    private static Mappings compile(IngestionRequest request) {
+        return Mappings.compile(request.getFieldMappings(), request.getKeyField(), request.getTimeField());
     }
 }

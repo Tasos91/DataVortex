@@ -14,6 +14,8 @@ public class WebPagesConfig implements WebMvcConfigurer {
 
     @Override
     public void addViewControllers(ViewControllerRegistry registry) {
+        registry.addViewController("/ingest").setViewName("forward:/ingest.html");
+        // Η παλιά σελίδα μόνο για CSV παραμένει· η νέα καλύπτει κάθε μορφή.
         registry.addViewController("/csv").setViewName("forward:/csv.html");
     }
 }

@@ -71,6 +71,29 @@
               # άρα τα 30s ήταν 30s καθυστέρηση στην πρώτη εισαγωγή κάθε νέας πηγής.
               metadata.max.age.ms: ${KAFKA_METADATA_MAX_AGE_MS:5000}
 
+              # --- Σταθερότητα υπό φορτίο: οι ρυθμίσεις που κρατούν τον consumer "ζωντανό" ---
+              # ΚΡΙΣΙΜΟ. Αν η επεξεργασία ενός batch διαρκέσει πάνω από max.poll.interval.ms, ο
+              # broker θεωρεί τον consumer νεκρό και ξεκινά rebalance. Ο consumer όμως δουλεύει
+              # ακόμα, τελειώνει, και προσπαθεί να κάνει commit σε partitions που δεν κατέχει πια:
+              # το batch ξαναδιαβάζεται, ξανααργεί, και το σύστημα κολλάει σε ΑΤΕΡΜΟΝΟ ΒΡΟΧΟ
+              # rebalance χωρίς να προχωρά. Το default των 5 λεπτών είναι επικίνδυνα κοντά όταν η
+              # βάση αργεί: με 500 εγγραφές ανά poll και 113 ms ανά batch έχουμε περιθώριο, αλλά
+              # μια στιγμιαία επιβράδυνση της βάσης (π.χ. συμπίεση chunk) το εξαντλεί.
+              max.poll.interval.ms: ${KAFKA_MAX_POLL_INTERVAL_MS:600000}   # 10 λεπτά
+              # Το heartbeat φεύγει από ΑΛΛΟ νήμα, άρα ο consumer δηλώνεται ζωντανός ακόμα κι όταν
+              # επεξεργάζεται. Τα 45s δίνουν χρόνο σε μια παροδική παύση GC ή δικτύου.
+              session.timeout.ms: ${KAFKA_SESSION_TIMEOUT_MS:45000}
+              heartbeat.interval.ms: ${KAFKA_HEARTBEAT_MS:3000}            # ~1/3 του session
+              # Συνεργατικό rebalance: τα partitions που δεν αλλάζουν κάτοχο ΔΕΝ σταματούν. Με το
+              # παλιό "όλοι αφήνουν τα πάντα", κάθε νέο topic πάγωνε ολόκληρο τον consumer group.
+              partition.assignment.strategy: org.apache.kafka.clients.consumer.CooperativeStickyAssignor
+              # Τα offsets τα κάνει commit το Spring μετά την επιτυχή εγγραφή, όχι ο client στο
+              # παρασκήνιο: με auto-commit θα δηλώναμε "διαβάστηκε" πριν γραφτεί στη βάση.
+              enable.auto.commit: false
+              # Όριο μεγέθους απάντησης, ώστε ένα μεγάλο fetch να μη ρίξει τη μνήμη.
+              fetch.max.bytes: ${KAFKA_FETCH_MAX_BYTES:52428800}           # 50 MB
+              max.partition.fetch.bytes: ${KAFKA_MAX_PARTITION_FETCH_BYTES:5242880}  # 5 MB
+
           bindings:
             consumeData-in-0:
               consumer:
@@ -120,7 +143,30 @@
           # αναμονή είναι το ζητούμενο (backpressure), όχι σφάλμα. Ο νεκρός broker πιάνεται
           # νωρίτερα από τον έλεγχο ύπαρξης topic, που απαντά 400/503 σε λίγα χιλιοστά.
           max.block.ms: ${KAFKA_MAX_BLOCK_MS:60000}
-          linger.ms: ${KAFKA_LINGER_MS:5}                    # Αλλάξαμε το 0 σε 5ms για να προλαβαίνει να γεμίσει το batch
+          # Το linger είναι ο ΜΕΓΙΣΤΟΣ χρόνος αναμονής, όχι ο ελάχιστος: ο producer στέλνει αμέσως
+          # μόλις ελευθερωθεί θέση αποστολής. Μετρημένο: batch.size.avg = 459 bytes ενώ το όριο
+          # είναι 65536 — τα batches φεύγουν σχεδόν άδεια επειδή ο broker απαντά σε 2 ms. Τα 20 ms
+          # δίνουν χρόνο να μαζευτούν περισσότερα, χωρίς αισθητή καθυστέρηση σε μαζική εισαγωγή.
+          linger.ms: ${KAFKA_LINGER_MS:20}
+
+          # ---------------- Εγγυήσεις παράδοσης (production) ----------------
+          # Καμία επιβεβαίωση πριν γραφτεί το μήνυμα σε όλα τα συγχρονισμένα αντίγραφα. Με έναν
+          # broker ισοδυναμεί με acks=1, αλλά όταν προστεθούν replicas η εγγύηση ισχύει αμέσως
+          # χωρίς αλλαγή κώδικα. Το κόστος σε ταχύτητα είναι αμελητέο δίπλα στο κόστος απώλειας.
+          acks: all
+          # Ο broker απορρίπτει τα διπλά που προκύπτουν από ΔΙΚΕΣ ΤΟΥ επαναλήψεις: χωρίς αυτό, ένα
+          # retry μετά από timeout δικτύου γράφει το ίδιο μήνυμα δύο φορές. Είναι ανεξάρτητο από
+          # το δικό μας dedup στη βάση — αυτό πιάνει τα διπλά του consumer, εκείνο του producer.
+          enable.idempotence: true
+          # Το μέγιστο που επιτρέπει το idempotence. Περισσότερα θα έσπαγαν τη σειρά σε retry.
+          max.in.flight.requests.per.connection: 5
+          retries: 2147483647                                # άπειρα· το όριο το βάζει το delivery.timeout
+          retry.backoff.ms: 100
+          # Συνολικό περιθώριο ενός μηνύματος: αναμονή στο buffer + retries + απάντηση. Μετά από
+          # αυτό ακυρώνεται και ο client ΤΟ ΜΑΘΑΙΝΕΙ (η απάντηση γίνεται 207). Τα 2 λεπτά του
+          # default ήταν λίγα όταν ο buffer γέμιζε· τα 5 λεπτά καλύπτουν και μια αργή στιγμή.
+          delivery.timeout.ms: ${KAFKA_DELIVERY_TIMEOUT_MS:300000}
+          request.timeout.ms: ${KAFKA_REQUEST_TIMEOUT_MS:30000}
 
       consumer:
         group-id: ${CONSUMER_GROUP:thesis-group-v3}

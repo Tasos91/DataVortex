@@ -1,12 +1,10 @@
 package com.thesis.kafkacollector.service;
 
-import com.thesis.kafkacollector.proto.IngestedRecordProto;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.TimeUnit;
@@ -24,12 +22,11 @@ public class IngestMeters {
 
     private static final Logger log = LoggerFactory.getLogger(IngestMeters.class);
 
-    private final KafkaTemplate<String, IngestedRecordProto.IngestedRecord> kafkaTemplate;
+    private final RecordSender sender;
     private final MeterRegistry registry;
 
-    public IngestMeters(KafkaTemplate<String, IngestedRecordProto.IngestedRecord> kafkaTemplate,
-                        MeterRegistry registry) {
-        this.kafkaTemplate = kafkaTemplate;
+    public IngestMeters(RecordSender sender, MeterRegistry registry) {
+        this.sender = sender;
         this.registry = registry;
     }
 
@@ -38,10 +35,18 @@ public class IngestMeters {
      * απάντηση έλεγε «στάλθηκαν N» ενώ τα μηνύματα ήταν ακόμα στο buffer του producer: αν έπεφτε το
      * Kafka, ο client είχε 200 και τα δεδομένα δεν υπήρχαν πουθενά.
      */
+    public IngestResult finish(String mode, int total, int read, int skipped, RecordSender.Session session) {
+        return finish(session.topic(), mode, total, read, skipped, session.failed());
+    }
+
     public IngestResult finish(String topic, String mode, int total, int read, int skipped, AtomicInteger failed) {
+        return finish(topic, mode, total, read, skipped, failed.get());
+    }
+
+    private IngestResult finish(String topic, String mode, int total, int read, int skipped, int failedCount) {
         long started = System.nanoTime();
-        kafkaTemplate.flush();
-        int accepted = read - failed.get();
+        sender.flush();
+        int accepted = read - failedCount;
         IngestResult result = new IngestResult(total, accepted, skipped);
 
         Timer.builder("datavortex.ingest.flush").tag("mode", mode)

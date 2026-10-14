@@ -8,15 +8,11 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.springframework.kafka.core.DefaultKafkaProducerFactory;
-import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.kafka.support.SendResult;
 
 import java.io.StringReader;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -30,27 +26,6 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class CsvIngestServiceTest {
 
-    /** Κρατά ό,τι στάλθηκε, χωρίς Kafka: μας ενδιαφέρει το μήνυμα, όχι η μεταφορά του. */
-    private static final class CapturingTemplate extends KafkaTemplate<String, IngestedRecord> {
-        final List<ProducerRecord<String, IngestedRecord>> sent = new ArrayList<>();
-
-        CapturingTemplate() {
-            super(new DefaultKafkaProducerFactory<>(Map.of()));
-        }
-
-        @Override
-        public CompletableFuture<SendResult<String, IngestedRecord>> send(
-                ProducerRecord<String, IngestedRecord> record) {
-            sent.add(record);
-            return CompletableFuture.completedFuture(null);
-        }
-
-        @Override
-        public void flush() {
-            // τίποτα: δεν υπάρχει αληθινός producer
-        }
-    }
-
     /** Δεν υπάρχει broker στα unit tests, άρα ο έλεγχος topic απλώς επιστρέφει το όνομα. */
     private static final class NoopTopics extends KafkaTopicService {
         NoopTopics() {
@@ -63,14 +38,14 @@ class CsvIngestServiceTest {
         }
     }
 
-    private CapturingTemplate template;
+    private TestSender sender;
     private CsvIngestService service;
 
     @BeforeEach
     void setUp() {
-        template = new CapturingTemplate();
-        service = new CsvIngestService(template, new NoopTopics(),
-                new IngestMeters(template, new SimpleMeterRegistry()));
+        sender = TestSender.create();
+        service = new CsvIngestService(sender, new NoopTopics(),
+                new IngestMeters(sender, new SimpleMeterRegistry()));
     }
 
     private static CsvPlan plan(String time, String key, String decimal, CsvPlan.Column... columns) {
@@ -96,7 +71,7 @@ class CsvIngestServiceTest {
 
         assertEquals(1, r.read());
         assertEquals(1, r.accepted());
-        IngestedRecord record = template.sent.get(0).value();
+        IngestedRecord record = sender.sent().get(0).value();
 
         Value temp = record.getFieldsMap().get("temp_c");
         assertEquals(Value.KindCase.NUMBER_VALUE, temp.getKindCase(),
@@ -115,7 +90,7 @@ class CsvIngestServiceTest {
                 2024-01-15T10:00:00Z,1,2,3
                 """, plan("ts", null, ".", col("a", "number")));
 
-        IngestedRecord record = template.sent.get(0).value();
+        IngestedRecord record = sender.sent().get(0).value();
         assertEquals(1, record.getFieldsCount());
         assertTrue(record.getFieldsMap().containsKey("a"));
         assertFalse(record.getFieldsMap().containsKey("b"));
@@ -128,14 +103,14 @@ class CsvIngestServiceTest {
                 new CsvPlan("s", "ingest.test", false, 1, ",", ".", true, "ts", null, null,
                         List.of(new CsvPlan.Column("temp_c", "TempC", "number")), false));
 
-        assertTrue(template.sent.get(0).value().getFieldsMap().containsKey("TempC"));
+        assertTrue(sender.sent().get(0).value().getFieldsMap().containsKey("TempC"));
     }
 
     @Test
     @DisplayName("ο χρόνος της στήλης γίνεται timestamp του μηνύματος — αλλιώς δεν υπάρχει χρονοσειρά")
     void eventTimeFromColumn() throws Exception {
         ingest("ts,v\n2024-01-15T10:30:00Z,1\n", plan("ts", null, ".", col("v", "number")));
-        assertEquals(1705314600000L, template.sent.get(0).timestamp());
+        assertEquals(1705314600000L, sender.sent().get(0).timestamp());
     }
 
     @Test
@@ -147,8 +122,8 @@ class CsvIngestServiceTest {
                 2024-01-15T10:00:00Z,patra,2
                 """, plan("ts", "station", ".", col("v", "number")));
 
-        assertEquals("athens", template.sent.get(0).key());
-        assertEquals("patra", template.sent.get(1).key());
+        assertEquals("athens", sender.sent().get(0).key());
+        assertEquals("patra", sender.sent().get(1).key());
     }
 
     @Test
@@ -159,7 +134,7 @@ class CsvIngestServiceTest {
                 2024-01-15T10:00:00Z,,NA
                 """, plan("ts", null, ".", col("v", "number"), col("w", "number")));
 
-        IngestedRecord record = template.sent.get(0).value();
+        IngestedRecord record = sender.sent().get(0).value();
         assertEquals(0, record.getFieldsCount(),
                 "ένα μηδέν θα έσερνε κάθε μέσο όρο προς τα κάτω σαν να ήταν μέτρηση");
     }
@@ -172,7 +147,7 @@ class CsvIngestServiceTest {
                 2024-01-15T10:00:00Z,oops
                 """, plan("ts", null, ".", col("v", "number")));
 
-        assertEquals(0, template.sent.get(0).value().getFieldsCount(),
+        assertEquals(0, sender.sent().get(0).value().getFieldsCount(),
                 "το ίδιο πεδίο με δύο τύπους δίνει δύο γραμμές στο field_catalog");
     }
 
@@ -183,14 +158,14 @@ class CsvIngestServiceTest {
                 List.of(col("temp", "number")), false);
         service.ingest(new StringReader("ts;temp\n2024-01-15T10:00:00Z;23,5\n"), p);
 
-        assertEquals(23.5, template.sent.get(0).value().getFieldsMap().get("temp").getNumberValue());
+        assertEquals(23.5, sender.sent().get(0).value().getFieldsMap().get("temp").getNumberValue());
     }
 
     @Test
     @DisplayName("boolean στήλη γίνεται bool_value")
     void booleans() throws Exception {
         ingest("ts,active\n2024-01-15T10:00:00Z,yes\n", plan("ts", null, ".", col("active", "bool")));
-        Value v = template.sent.get(0).value().getFieldsMap().get("active");
+        Value v = sender.sent().get(0).value().getFieldsMap().get("active");
         assertEquals(Value.KindCase.BOOL_VALUE, v.getKindCase());
         assertTrue(v.getBoolValue());
     }
@@ -199,14 +174,14 @@ class CsvIngestServiceTest {
     @DisplayName("ο ωμός payload δεν στέλνεται αν δεν ζητηθεί: διπλασιάζει bytes χωρίς λόγο")
     void rawPayloadIsOptional() throws Exception {
         ingest("ts,v\n2024-01-15T10:00:00Z,1\n", plan("ts", null, ".", col("v", "number")));
-        assertEquals("", template.sent.get(0).value().getPayloadJson());
+        assertEquals("", sender.sent().get(0).value().getPayloadJson());
 
-        template.sent.clear();
+        sender.clear();
         CsvPlan withRaw = new CsvPlan("s", "ingest.test", false, 1, ",", ".", true, "ts", null, null,
                 List.of(col("v", "number")), true);
         service.ingest(new StringReader("ts,v\n2024-01-15T10:00:00Z,1\n"), withRaw);
         assertEquals("{\"ts\":\"2024-01-15T10:00:00Z\",\"v\":\"1\"}",
-                template.sent.get(0).value().getPayloadJson());
+                sender.sent().get(0).value().getPayloadJson());
     }
 
     @Test
@@ -219,7 +194,7 @@ class CsvIngestServiceTest {
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
                 () -> service.ingest(new StringReader(csv), p));
         assertTrue(e.getMessage().contains("timeFormat"), e.getMessage());
-        assertTrue(template.sent.isEmpty(), "ούτε ένα μήνυμα δεν έφυγε με λάθος χρόνο");
+        assertTrue(sender.sent().isEmpty(), "ούτε ένα μήνυμα δεν έφυγε με λάθος χρόνο");
     }
 
     @Test
@@ -229,7 +204,7 @@ class CsvIngestServiceTest {
                 "dd/MM/yyyy HH:mm", null, List.of(col("v", "number")), false);
         service.ingest(new StringReader("ts,v\n15/01/2024 10:30,1\n"), p);
 
-        assertEquals(1705314600000L, template.sent.get(0).timestamp());
+        assertEquals(1705314600000L, sender.sent().get(0).timestamp());
     }
 
     @Test
@@ -256,7 +231,7 @@ class CsvIngestServiceTest {
         IngestResult r = service.ingest(new StringReader("a,1\nb,2\n"), p);
 
         assertEquals(2, r.read(), "καμία γραμμή δεν θυσιάστηκε για επικεφαλίδες");
-        assertEquals(1.0, template.sent.get(0).value().getFieldsMap().get("col_2").getNumberValue());
+        assertEquals(1.0, sender.sent().get(0).value().getFieldsMap().get("col_2").getNumberValue());
     }
 
     @Test
@@ -269,14 +244,14 @@ class CsvIngestServiceTest {
                 """, plan("ts", null, ".", col("a", "number"), col("b", "number")));
 
         assertEquals(2, r.read());
-        assertEquals(1, template.sent.get(1).value().getFieldsCount());
+        assertEquals(1, sender.sent().get(1).value().getFieldsCount());
     }
 
     @Test
     @DisplayName("χωρίς στήλη χρόνου δεν μπαίνει timestamp: ο χρόνος γίνεται η ώρα της εισαγωγής")
     void noTimeColumn() throws Exception {
         ingest("a\n1\n", plan(null, null, ".", col("a", "number")));
-        assertNull(template.sent.get(0).timestamp());
+        assertNull(sender.sent().get(0).timestamp());
     }
 
     @Test
@@ -291,6 +266,6 @@ class CsvIngestServiceTest {
         assertEquals(1000, r.read());
         assertEquals(1000, r.accepted());
         assertEquals(0, r.failed());
-        assertEquals(999.0, template.sent.get(999).value().getFieldsMap().get("v").getNumberValue());
+        assertEquals(999.0, sender.sent().get(999).value().getFieldsMap().get("v").getNumberValue());
     }
 }

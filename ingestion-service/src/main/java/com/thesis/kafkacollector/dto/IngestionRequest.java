@@ -27,6 +27,11 @@ public class IngestionRequest {
     // Μέσα στο payload: το ίδιο το JSON που θα σταλεί (αντικείμενο ή πίνακας αντικειμένων).
     // Όταν υπάρχει, δεν χρειάζονται fileType / filePath.
     private Object payload;
+    // Να κρατηθεί ολόκληρο το αρχικό JSON μαζί με τα πεδία; Default true για συμβατότητα: το
+    // /api/v1/records δείχνει τις ωμές εγγραφές. Με false γλιτώνεις τη μισή κίνηση προς το Kafka
+    // και τον μισό χώρο στη βάση, αφού τα πεδία που διάλεξες αποθηκεύονται ούτως ή άλλως.
+    private boolean storeRawPayload = true;
+
     // Όνομα πεδίου Protobuf -> διαδρομή στο payload, e.g. {"EthPrice": "$.ethusdt.max"}
     // Για αρχεία CSV μπορεί να είναι και σκέτο όνομα στήλης: {"lat": "LATITUDE"}
     private Map<String, String> fieldMappings;
@@ -59,6 +64,9 @@ public class IngestionRequest {
 
     public Object getPayload() { return payload; }
     public void setPayload(Object payload) { this.payload = payload; }
+
+    public boolean isStoreRawPayload() { return storeRawPayload; }
+    public void setStoreRawPayload(boolean storeRawPayload) { this.storeRawPayload = storeRawPayload; }
 
     public Map<String, String> getFieldMappings() { return fieldMappings; }
     public void setFieldMappings(Map<String, String> fieldMappings) { this.fieldMappings = fieldMappings; }
