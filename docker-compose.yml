@@ -80,6 +80,7 @@ services:
       - "9090:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml # Απαιτεί ένα μικρό αρχειάκι
+      - ./prometheus-rules.yml:/etc/prometheus/rules.yml
     # Σε Linux το host.docker.internal δεν υπάρχει από μόνο του: χωρίς αυτό το Prometheus
     # δεν βλέπει τα Java services που τρέχουν έξω από το Docker.
     extra_hosts:

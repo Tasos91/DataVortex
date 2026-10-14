@@ -1,0 +1,62 @@
+# Κανόνες συναγερμού. Δεν στέλνουν ειδοποιήσεις από μόνοι τους (δεν τρέχει Alertmanager) —
+# φαίνονται στο Prometheus (Alerts) και στο Grafana. Είναι η τεκμηρίωση του «τι θεωρούμε πρόβλημα».
+groups:
+  - name: datavortex
+    interval: 15s
+    rules:
+      # Το πιο σημαντικό: η αποθήκευση δεν προλαβαίνει την εισαγωγή. Μετράμε την ΤΑΣΗ και όχι
+      # την απόλυτη τιμή, γιατί μια στιγμιαία αιχμή lag μετά από burst είναι φυσιολογική.
+      - alert: ConsumerLagGrowing
+        expr: deriv(sum(datavortex_kafka_consumer_lag)[5m:30s]) > 50
+        for: 3m
+        labels: { severity: warning }
+        annotations:
+          summary: "Το consumer lag ανεβαίνει σταθερά"
+          description: "Η αποθήκευση δεν προλαβαίνει την εισαγωγή εδώ και 3 λεπτά."
+
+      - alert: ConsumerStalled
+        expr: sum(datavortex_kafka_consumer_lag) > 1000
+          and rate(datavortex_consume_records_total{result="ok"}[5m]) == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Υπάρχει lag αλλά ο consumer δεν διαβάζει τίποτα"
+          description: "Πιθανό κόλλημα: δες αν ο consumer ξαναπροσπαθεί σε κάποιο μήνυμα."
+
+      - alert: ServiceDown
+        expr: up{job="datavortex"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Η υπηρεσία {{ $labels.service }} δεν απαντά"
+
+      - alert: MessagesGoingToDlq
+        expr: sum(rate(datavortex_consume_records_total{result="unreadable"}[5m])) > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "Μηνύματα καταλήγουν στο DLQ"
+          description: "Κάποιος γράφει στο topic με λάθος μορφή, ή άλλαξε ασύμβατα το schema."
+
+      - alert: DatabaseRowsRejected
+        expr: sum(rate(datavortex_db_rows_total{result="rejected"}[5m])) > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "Η βάση απορρίπτει γραμμές"
+          description: "Δεν είναι διπλά (αυτά μετριούνται ξεχωριστά): κάτι στα δεδομένα δεν περνά."
+
+      - alert: SlowDatabaseWrites
+        expr: histogram_quantile(0.99, sum by (le) (rate(datavortex_db_insert_seconds_bucket[5m]))) > 2
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Οι εγγραφές στη βάση αργούν (p99 > 2s)"
+
+      - alert: AnalysisSlow
+        expr: histogram_quantile(0.99, sum by (le) (rate(datavortex_analysis_duration_seconds_bucket[5m]))) > 3
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Η ανάλυση αργεί (p99 > 3s)"
+          description: "Τρέχει πάνω σε κουβάδες, όχι σε ωμές γραμμές: δεν πρέπει να μεγαλώνει με τον όγκο."
