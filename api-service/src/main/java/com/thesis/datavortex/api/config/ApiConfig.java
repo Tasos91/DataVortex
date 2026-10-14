@@ -9,7 +9,6 @@ import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.cache.caffeine.CaffeineCacheManager;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.web.filter.ShallowEtagHeaderFilter;
 
 import java.time.Duration;
 
@@ -49,16 +48,15 @@ public class ApiConfig {
         return manager;
     }
 
-    /**
-     * ETag μόνο στα API: το filter κρατά την απάντηση στη μνήμη για να υπολογίσει hash, και
-     * σε στατικά αρχεία αυτό χαλάει την απευθείας αποστολή (η welcome page γύριζε κενή).
-     * Τα στατικά έχουν άλλωστε ήδη Last-Modified.
+    /*
+     * ΔΕΝ χρησιμοποιούμε ShallowEtagHeaderFilter.
+     *
+     * Το filter κρατά όλη την απάντηση στη μνήμη για να υπολογίσει hash και, όπως φάνηκε με
+     * μέτρηση, εμποδίζει τη συμπίεση του Tomcat: η ίδια απάντηση γύριζε 83 KB ασυμπίεστη με GET
+     * ενώ με HEAD (όπου το filter δεν παρεμβαίνει) γύριζε gzip.
+     *
+     * Το ETag κερδίζει μόνο όταν η απάντηση ΔΕΝ έχει αλλάξει. Εδώ τα δεδομένα είναι χρονοσειρές
+     * που ανανεώνονται συνεχώς, άρα σχεδόν κάθε απάντηση είναι διαφορετική: το gzip (−80% σε
+     * ΚΑΘΕ απάντηση) αξίζει περισσότερο από ένα 304 που σπάνια θα συμβεί.
      */
-    @Bean
-    public org.springframework.boot.web.servlet.FilterRegistrationBean<ShallowEtagHeaderFilter> etagFilter() {
-        var registration = new org.springframework.boot.web.servlet.FilterRegistrationBean<>(
-                new ShallowEtagHeaderFilter());
-        registration.addUrlPatterns("/api/*");
-        return registration;
-    }
 }
