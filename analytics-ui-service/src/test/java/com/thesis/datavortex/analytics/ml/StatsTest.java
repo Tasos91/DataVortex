@@ -67,6 +67,19 @@ class StatsTest {
     }
 
     @Test
+    void missingMeasurementsAreIgnoredNotCountedAsZero() {
+        // Τρεις μετρήσεις γύρω στο 100 και δύο κουβάδες χωρίς μέτρηση.
+        double[] withGaps = {100, Double.NaN, 102, Double.NaN, 101};
+        assertEquals(101, Stats.median(withGaps), 1e-9);
+        assertEquals(101, Stats.mean(withGaps), 1e-9);
+        assertEquals(3, Stats.present(withGaps).length);
+        // Αν τα κενά μετρούσαν ως μηδέν, η διάμεσος θα έπεφτε στο 100 και η διασπορά θα
+        // εκτοξευόταν, βγάζοντας "ανωμαλία" εκεί που απλώς δεν υπάρχει μέτρηση.
+        assertTrue(Stats.mad(withGaps) < 3, "το κενό δεν πρέπει να φουσκώνει τη διασπορά");
+        assertEquals(0, Stats.robustZ(Double.NaN, 101, 1.5), "κενό δεν είναι ανωμαλία");
+    }
+
+    @Test
     void emptyAndTinyInputsDoNotThrow() {
         assertTrue(Double.isNaN(Stats.median(new double[0])));
         assertEquals(0, Stats.stddev(new double[]{1}));

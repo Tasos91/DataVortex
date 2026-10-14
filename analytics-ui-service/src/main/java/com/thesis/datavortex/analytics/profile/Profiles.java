@@ -80,6 +80,9 @@ public final class Profiles {
             }
             List<Analysis.Anomaly> forField = new ArrayList<>();
             for (int i = 0; i < column.length; i++) {
+                if (!Double.isFinite(column[i])) {
+                    continue; // δεν μετρήθηκε
+                }
                 double z = Stats.robustZ(column[i], median, mad);
                 if (Math.abs(z) >= threshold) {
                     forField.add(new Analysis.Anomaly(input.times().get(i), field, round(column[i]),
@@ -104,6 +107,59 @@ public final class Profiles {
             distances[i] = KMeans.distance(scaled[i], clustering.result().centroids()[cluster]);
         }
         return distances;
+    }
+
+    /**
+     * Εξομαλύνει την κατάταξη με πλειοψηφία σε μικρό παράθυρο.
+     * <p>
+     * Όταν μια τιμή ταλαντώνεται γύρω από ένα όριο, η κατηγορία αλλάζει σε κάθε κουβά και η
+     * λωρίδα του χρόνου γίνεται κομφετί: οπτικά αδιάβαστη και αναλυτικά παραπλανητική, αφού
+     * δείχνει δεκάδες «μεταβάσεις» που δεν συνέβησαν. Η πλειοψηφία γειτονιάς κρατά το
+     * επικρατούν καθεστώς και σβήνει τα μεμονωμένα αναπηδήματα, χωρίς να μετακινεί τα
+     * πραγματικά σύνορα.
+     *
+     * ΠΡΟΣΟΧΗ: οι κατηγορίες συναγερμού ΔΕΝ εξομαλύνονται. Μια υποβάθμιση δύο κουβάδων είναι
+     * ακριβώς το σήμα που ψάχνουμε, και μια πλειοψηφία γειτόνων θα την έσβηνε — το βρήκε το
+     * test {@code telemetryFlagsSlowWithoutLoadAsDegradation}.
+     *
+     * @param window    περιττός αριθμός κουβάδων· 1 σημαίνει καμία εξομάλυνση
+     * @param protectedClasses κατηγορίες που ούτε σβήνονται ούτε απλώνονται στους γείτονες
+     */
+    public static List<String> smooth(List<String> classNames, int window,
+                                      java.util.Set<String> protectedClasses) {
+        if (window < 3 || classNames.size() < window) {
+            return classNames;
+        }
+        int half = window / 2;
+        List<String> out = new ArrayList<>(classNames.size());
+        for (int i = 0; i < classNames.size(); i++) {
+            if (protectedClasses.contains(classNames.get(i))) {
+                out.add(classNames.get(i));
+                continue;
+            }
+            Map<String, Integer> votes = new LinkedHashMap<>();
+            for (int j = Math.max(0, i - half); j <= Math.min(classNames.size() - 1, i + half); j++) {
+                String neighbour = classNames.get(j);
+                if (!protectedClasses.contains(neighbour)) {
+                    votes.merge(neighbour, 1, Integer::sum);
+                }
+            }
+            // Ισοψηφία: κερδίζει η τρέχουσα τιμή, για να μην εισάγουμε αυθαίρετες μεταβάσεις.
+            String winner = classNames.get(i);
+            int best = votes.getOrDefault(winner, 0);
+            for (Map.Entry<String, Integer> vote : votes.entrySet()) {
+                if (vote.getValue() > best) {
+                    best = vote.getValue();
+                    winner = vote.getKey();
+                }
+            }
+            out.add(winner);
+        }
+        return out;
+    }
+
+    public static List<String> smooth(List<String> classNames, int window) {
+        return smooth(classNames, window, java.util.Set.of());
     }
 
     public static List<Analysis.ClassCount> countClasses(List<String> classNames) {
