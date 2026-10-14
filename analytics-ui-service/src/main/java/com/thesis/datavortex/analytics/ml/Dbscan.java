@@ -187,14 +187,7 @@ public final class Dbscan {
         return kDistances;
     }
 
-    /** Η απλή εκδοχή: ένα ποσοστημόριο της k-distance, χωρίς αναζήτηση. */
-    public static double suggestEps(double[][] data, int minPts) {
-        if (data.length <= minPts) {
-            return 1.0;
-        }
-        double eps = Stats.quantile(kDistances(data, minPts), 0.80);
-        return eps > 1e-9 ? eps : 1.0;
-    }
+
 
     private static List<Integer> neighbours(double[][] data, int index, double eps) {
         List<Integer> found = new ArrayList<>();

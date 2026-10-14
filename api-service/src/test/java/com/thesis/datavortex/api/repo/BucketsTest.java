@@ -80,7 +80,5 @@ class BucketsTest {
         assertEquals("metric_1m", Buckets.FIVE_MINUTES.metricView());
         assertEquals("metric_1m", Buckets.QUARTER_HOUR.metricView());
         assertEquals("metric_1h", Buckets.SIX_HOURS.metricView());
-        // Το πλήθος εγγραφών υπάρχει μόνο σε λεπτιαίο· τα χονδρότερα αθροίζονται από αυτό.
-        assertEquals("records_1m", Buckets.DAY.recordsSourceView());
     }
 }

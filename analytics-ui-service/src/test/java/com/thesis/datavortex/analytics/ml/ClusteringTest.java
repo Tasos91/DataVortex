@@ -94,17 +94,27 @@ class ClusteringTest {
     }
 
     @Test
-    void dbscanSuggestsUsableEps() {
-        Random random = new Random(3);
-        double[][] data = new double[40][2];
-        for (int i = 0; i < data.length; i++) {
-            data[i] = new double[]{random.nextGaussian(), random.nextGaussian()};
+    void dbscanChoosesEpsItselfAndFindsBothGroups() {
+        // Το eps είναι η αχίλλειος πτέρνα του DBSCAN: λίγο μικρό και η ομάδα σπάει σε κομμάτια,
+        // λίγο μεγάλο και δύο συμπεριφορές γίνονται μία. Το fitAuto δοκιμάζει πολλά και κρατά
+        // αυτό που δίνει καθαρό διαχωρισμό με λίγο θόρυβο.
+        Random random = new Random(21);
+        double[][] data = new double[82][2];
+        for (int i = 0; i < 40; i++) {
+            data[i] = new double[]{random.nextGaussian() * 0.3, random.nextGaussian() * 0.3};
         }
-        double eps = Dbscan.suggestEps(data, 4);
-        assertTrue(eps > 0 && eps < 5, "το eps πρέπει να είναι στην κλίμακα των δεδομένων: " + eps);
-        int[] labels = Dbscan.fit(data, eps, 4);
-        long clustered = java.util.Arrays.stream(labels).filter(l -> l != Dbscan.NOISE).count();
-        assertTrue(clustered > data.length / 2, "με αυτόματο eps τα περισσότερα σημεία βρίσκουν ομάδα");
+        for (int i = 40; i < 80; i++) {
+            data[i] = new double[]{6 + random.nextGaussian() * 0.3, 6 + random.nextGaussian() * 0.3};
+        }
+        data[80] = new double[]{30, -30};
+        data[81] = new double[]{-28, 26};
+
+        Dbscan.Fit fit = Dbscan.fitAuto(data, 4);
+
+        assertEquals(2, fit.clusters(), "δύο πυκνές περιοχές, όχι περισσότερες");
+        assertEquals(2, fit.noise(), "και τα δύο μακρινά σημεία είναι θόρυβος");
+        assertTrue(fit.eps() > 0, "το eps επιλέχθηκε από τα δεδομένα");
+        assertNotEquals(fit.labels()[0], fit.labels()[79]);
     }
 
     @Test
