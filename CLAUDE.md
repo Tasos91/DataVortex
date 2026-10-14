@@ -214,4 +214,5 @@ writer γράφει στο `metric_points` μόνο ό,τι έχει `jsonb_type
   απόδοσης/UI, απόδειξη κλίμακας (7 εκατ. σημεία), τι έπιασαν τα integration tests. Διάβασέ το **μόνο**
   όταν ψάχνεις συγκεκριμένο νούμερο ή την αιτία μιας απόφασης.
 - **[README.md](README.md)** — η ματιά του χρήστη.
-- Tests: δες `scripts/t.sh`. Τελευταία μέτρηση στο NOTES.
+- **Tests: 155** (67 ingestion + 27 api + 53 ui + 8 `IngestedRecordWriterIT`), από τα οποία 26
+  integration. Τα `*IT` τρέχουν μόνο ρητά — δες **Εντολές** πιο πάνω.
