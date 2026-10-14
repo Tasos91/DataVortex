@@ -48,11 +48,6 @@ public enum Buckets {
         return width;
     }
 
-    /** Το πλήθος εγγραφών υπάρχει μόνο σε λεπτό· τα χονδρότερα αθροίζονται από αυτό. */
-    public String recordsSourceView() {
-        return MINUTE.metricView.replace("metric", "records");
-    }
-
     public static Buckets of(String requested, Instant from, Instant to) {
         if (requested != null && !requested.isBlank() && !"auto".equalsIgnoreCase(requested)) {
             for (Buckets b : values()) {
