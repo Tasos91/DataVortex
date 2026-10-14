@@ -13,6 +13,15 @@ public record TimeRange(Instant from, Instant to) {
 
     private static final Duration DEFAULT = Duration.ofHours(6);
     private static final Duration MAX = Duration.ofDays(3650);
+    /**
+     * Σε πόσο "χοντρά" βήματα στρογγυλοποιείται το τέλος ενός σχετικού διαστήματος.
+     * <p>
+     * Χωρίς αυτό, το {@code range=6h} σημαίνει "μέχρι τώρα" και το «τώρα» αλλάζει σε κάθε
+     * χιλιοστό: κάθε request παίρνει άλλο κλειδί cache, άρα το cache <b>δεν χτυπά ποτέ</b> και
+     * η ακριβή ανάλυση ξανατρέχει ολόκληρη σε κάθε ανανέωση της σελίδας. Με στρογγυλοποίηση
+     * στα 30 δευτερόλεπτα, όσοι ζητούν το ίδιο παράθυρο μοιράζονται το ίδιο αποτέλεσμα.
+     */
+    private static final Duration GRAIN = Duration.ofSeconds(30);
 
     public static TimeRange of(String range, Instant from, Instant to) {
         if (from != null && to != null) {
@@ -21,10 +30,16 @@ public record TimeRange(Instant from, Instant to) {
             }
             return new TimeRange(from, to);
         }
-        Instant end = to != null ? to : Instant.now();
+        Instant end = to != null ? to : snap(Instant.now());
         Duration window = parse(range);
         Instant start = from != null ? from : end.minus(window);
         return new TimeRange(start, end);
+    }
+
+    /** Στρογγυλοποίηση προς τα κάτω στο {@link #GRAIN}. */
+    private static Instant snap(Instant moment) {
+        long grain = GRAIN.toMillis();
+        return Instant.ofEpochMilli(moment.toEpochMilli() / grain * grain);
     }
 
     /** Δέχεται {@code 30m}, {@code 6h}, {@code 7d}, {@code 4w}. */

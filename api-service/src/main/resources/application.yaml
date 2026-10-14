@@ -1,4 +1,10 @@
 spring:
+  # Virtual threads (Java 21): κάθε request περιμένει σε δίκτυο ή βάση, όχι σε CPU. Έτσι λίγοι
+  # πυρήνες εξυπηρετούν πολλά ταυτόχρονα requests χωρίς να δεσμεύεται ένα βαρύ thread ανά request.
+  threads:
+    virtual:
+      enabled: true
+
   application:
     name: datavortex-api
 

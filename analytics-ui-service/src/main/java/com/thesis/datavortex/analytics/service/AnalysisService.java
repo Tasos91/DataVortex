@@ -32,11 +32,14 @@ public class AnalysisService {
 
     private final ApiClient api;
     private final ProfileRegistry registry;
+    private final java.util.concurrent.ExecutorService executor;
     private final Timer analysisTimer;
 
-    public AnalysisService(ApiClient api, ProfileRegistry registry, MeterRegistry meters) {
+    public AnalysisService(ApiClient api, ProfileRegistry registry, MeterRegistry meters,
+                           java.util.concurrent.ExecutorService executor) {
         this.api = api;
         this.registry = registry;
+        this.executor = executor;
         this.analysisTimer = Timer.builder("datavortex.analysis.duration")
                 .description("Χρόνος μιας πλήρους ανάλυσης (clustering, κατάταξη, ανωμαλίες)")
                 .publishPercentileHistogram()
@@ -46,8 +49,13 @@ public class AnalysisService {
     @Cacheable(value = "analysis", key = "#source + '|' + #from + '|' + #to + '|' + #bucket + '|' + #profileId")
     public Analysis analyse(String source, Instant from, Instant to, String bucket, String profileId) {
         return analysisTimer.record(() -> {
+            // Μέσοι όροι και αιχμές ταυτόχρονα: είναι δύο ανεξάρτητα requests σε άλλο service,
+            // άρα ο συνολικός χρόνος είναι του πιο αργού και όχι το άθροισμα.
+            var peaksFuture = java.util.concurrent.CompletableFuture.supplyAsync(
+                    () -> api.matrix(source, from, to, bucket, "max"), executor);
             ApiDtos.Matrix matrix = api.matrix(source, from, to, bucket, "avg");
             if (matrix == null || matrix.rows() == null || matrix.rows().isEmpty()) {
+                peaksFuture.cancel(true);
                 DataProfile fallback = registry.resolve(source, List.of(), profileId);
                 return emptyAnalysis(fallback, source, bucket, from, to);
             }
@@ -59,11 +67,11 @@ public class AnalysisService {
                 values.add(row.values() == null ? Map.of() : row.values());
             }
 
-            // Και οι αιχμές: ο μέσος όρος ενός κουβά κρύβει τη μία αργή μέτρηση μέσα στις 80
-            // γρήγορες. Το ίδιο cache-άρεται στο api-service, άρα το δεύτερο request είναι φθηνό.
+            // Οι αιχμές ήρθαν παράλληλα· ο μέσος όρος ενός κουβά κρύβει τη μία αργή μέτρηση
+            // μέσα στις 80 γρήγορες.
             List<Map<String, Double>> peaks = new ArrayList<>(times.size());
             try {
-                ApiDtos.Matrix maxMatrix = api.matrix(source, from, to, matrix.bucket(), "max");
+                ApiDtos.Matrix maxMatrix = peaksFuture.join();
                 if (maxMatrix != null && maxMatrix.rows() != null
                         && maxMatrix.rows().size() == matrix.rows().size()) {
                     for (ApiDtos.Matrix.Row row : maxMatrix.rows()) {

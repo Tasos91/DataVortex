@@ -77,13 +77,22 @@ public class GenericProfile implements DataProfile {
             clusters.add(describe(clusterCount, "απομακρυσμένα", labels, Dbscan.NOISE, raw, features));
         }
 
+        // Διάμεσος και MAD μία φορά ανά πεδίο, έξω από τον βρόχο των σημείων: μέσα θα ήταν
+        // δύο ταξινομήσεις ανά σημείο ανά πεδίο, δηλαδή O(n² log n).
+        double[][] columns = new double[features.size()][];
+        double[] medians = new double[features.size()];
+        double[] mads = new double[features.size()];
+        for (int f = 0; f < features.size(); f++) {
+            columns[f] = input.column(features.get(f));
+            medians[f] = Stats.median(columns[f]);
+            mads[f] = Stats.mad(columns[f]);
+        }
+
         double[] anomalyScores = new double[input.size()];
         for (int i = 0; i < input.size(); i++) {
             double worst = 0;
-            for (String field : features) {
-                double[] column = input.column(field);
-                worst = Math.max(worst, Math.abs(
-                        Stats.robustZ(column[i], Stats.median(column), Stats.mad(column))));
+            for (int f = 0; f < columns.length; f++) {
+                worst = Math.max(worst, Math.abs(Stats.robustZ(columns[f][i], medians[f], mads[f])));
             }
             // Ο θόρυβος του DBSCAN είναι από μόνος του ένδειξη, ακόμα κι όταν κανένα
             // μεμονωμένο πεδίο δεν φαίνεται ακραίο: μπορεί να είναι ο ΣΥΝΔΥΑΣΜΟΣ που είναι σπάνιος.

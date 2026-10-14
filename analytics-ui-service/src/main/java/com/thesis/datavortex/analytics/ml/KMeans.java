@@ -13,8 +13,16 @@ import java.util.Random;
  */
 public final class KMeans {
 
-    private static final int MAX_ITERATIONS = 100;
-    private static final int RESTARTS = 8;
+    /**
+     * Το k-means συγκλίνει συνήθως σε 10–30 επαναλήψεις· το 50 είναι ταβάνι ασφαλείας και όχι
+     * ο κανόνας. Με 100 πληρώναμε διπλάσιο χειρότερο χρόνο για μηδενική διαφορά.
+     */
+    private static final int MAX_ITERATIONS = 50;
+    /**
+     * Τέσσερις εκκινήσεις, όχι οκτώ: με k-means++ η αρχικοποίηση είναι ήδη καλή και οι
+     * επιπλέον εκκινήσεις σπάνια βρίσκουν κάτι καλύτερο — απλώς διπλασιάζουν τον χρόνο.
+     */
+    private static final int RESTARTS = 4;
 
     private KMeans() {}
 
@@ -33,12 +41,20 @@ public final class KMeans {
     }
 
     public static Result fit(double[][] data, int k) {
+        return fit(data, k, RESTARTS);
+    }
+
+    /**
+     * @param restarts πόσες φορές ξεκινά από την αρχή. Λίγες αρκούν όταν ψάχνουμε μόνο το
+     *                 <i>πλήθος</i> των ομάδων· περισσότερες αξίζουν στην τελική προσαρμογή.
+     */
+    public static Result fit(double[][] data, int k, int restarts) {
         if (data.length == 0 || k <= 0) {
             return new Result(new int[0], new double[0][0], 0, 0);
         }
         int effectiveK = Math.min(k, data.length);
         Result best = null;
-        for (int restart = 0; restart < RESTARTS; restart++) {
+        for (int restart = 0; restart < Math.max(1, restarts); restart++) {
             Result candidate = runOnce(data, effectiveK, new Random(42L + restart * 7919L));
             if (best == null || candidate.inertia() < best.inertia()) {
                 best = candidate;

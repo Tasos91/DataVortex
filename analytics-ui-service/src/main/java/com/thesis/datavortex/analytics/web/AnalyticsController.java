@@ -27,11 +27,49 @@ public class AnalyticsController {
     private final AnalysisService analysis;
     private final ApiClient api;
     private final ProfileRegistry profiles;
+    private final java.util.concurrent.ExecutorService executor;
 
-    public AnalyticsController(AnalysisService analysis, ApiClient api, ProfileRegistry profiles) {
+    public AnalyticsController(AnalysisService analysis, ApiClient api, ProfileRegistry profiles,
+                               java.util.concurrent.ExecutorService executor) {
         this.analysis = analysis;
         this.api = api;
         this.profiles = profiles;
+        this.executor = executor;
+    }
+
+    /**
+     * Ό,τι χρειάζεται η σελίδα, σε ΕΝΑ request και με παράλληλη συλλογή.
+     * <p>
+     * Πριν, το UI έκανε τρία διαδοχικά requests και περίμενε το άθροισμα των χρόνων· τώρα
+     * περιμένει τον πιο αργό. Κερδίζει και το δίκτυο: μία σύνδεση, μία συμπίεση, ένα ETag.
+     */
+    @GetMapping("/dashboard")
+    public Map<String, Object> dashboard(@RequestParam String source,
+                                         @RequestParam(required = false, defaultValue = "6h") String range,
+                                         @RequestParam(required = false) Instant from,
+                                         @RequestParam(required = false) Instant to,
+                                         @RequestParam(required = false, defaultValue = "auto") String bucket,
+                                         @RequestParam(required = false, defaultValue = "auto") String profile,
+                                         @RequestParam(required = false, defaultValue = "25") int records) {
+        TimeRange r = TimeRange.of(range, from, to);
+        var analysisTask = java.util.concurrent.CompletableFuture.supplyAsync(
+                () -> analysis.analyse(source, r.from(), r.to(), bucket, profile), executor);
+        var matrixTask = java.util.concurrent.CompletableFuture.supplyAsync(
+                () -> api.matrix(source, r.from(), r.to(), bucket, "avg"), executor);
+        var ratesTask = java.util.concurrent.CompletableFuture.supplyAsync(
+                () -> api.rates(source, r.from(), r.to(), bucket), executor);
+        var recordsTask = java.util.concurrent.CompletableFuture.supplyAsync(
+                () -> api.records(source, r.from(), r.to(), null, Math.min(Math.max(records, 1), 200)),
+                executor);
+
+        Map<String, Object> payload = new java.util.LinkedHashMap<>();
+        payload.put("from", r.from());
+        payload.put("to", r.to());
+        payload.put("analysis", analysisTask.join());
+        payload.put("matrix", matrixTask.join());
+        payload.put("rates", ratesTask.join());
+        payload.put("records", recordsTask.join());
+        return payload;
     }
 
     @GetMapping("/sources")
