@@ -4,18 +4,11 @@ import com.thesis.kafkacollector.csv.CsvPlan;
 import com.thesis.kafkacollector.csv.CsvReader;
 import com.thesis.kafkacollector.proto.IngestedRecordProto.IngestedRecord;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
-import org.apache.kafka.clients.producer.ProducerRecord;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.springframework.kafka.core.DefaultKafkaProducerFactory;
-import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.kafka.support.SendResult;
 
 import java.io.StringReader;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -52,28 +45,6 @@ class CsvThroughputTest {
                 false);
     }
 
-    /** Μετράει μηνύματα και τα πετάει: εδώ μας ενδιαφέρει το κόστος της μετατροπής. */
-    private static final class CountingTemplate extends KafkaTemplate<String, IngestedRecord> {
-        final AtomicLong sent = new AtomicLong();
-        final AtomicLong fields = new AtomicLong();
-
-        CountingTemplate() {
-            super(new DefaultKafkaProducerFactory<>(Map.of()));
-        }
-
-        @Override
-        public CompletableFuture<SendResult<String, IngestedRecord>> send(
-                ProducerRecord<String, IngestedRecord> record) {
-            sent.incrementAndGet();
-            fields.addAndGet(record.value().getFieldsCount());
-            return CompletableFuture.completedFuture(null);
-        }
-
-        @Override
-        public void flush() {
-        }
-    }
-
     private static final class NoopTopics extends KafkaTopicService {
         NoopTopics() {
             super(null);
@@ -100,17 +71,18 @@ class CsvThroughputTest {
         long readMs = (System.nanoTime() - started) / 1_000_000;
         assertEquals(ROWS + 1, rows, "οι γραμμές συν η επικεφαλίδα");
 
-        CountingTemplate template = new CountingTemplate();
-        CsvIngestService service = new CsvIngestService(template, new NoopTopics(),
-                new IngestMeters(template, new SimpleMeterRegistry()));
+        TestSender sender = TestSender.create();
+        CsvIngestService service = new CsvIngestService(sender, new NoopTopics(),
+                new IngestMeters(sender, new SimpleMeterRegistry()));
 
         started = System.nanoTime();
         IngestResult result = service.ingest(new StringReader(csv), plan());
         long mapMs = (System.nanoTime() - started) / 1_000_000;
 
         assertEquals(ROWS, result.read());
-        assertEquals(ROWS, template.sent.get());
-        assertEquals(6L * ROWS, template.fields.get(), "έξι πεδία ανά γραμμή");
+        assertEquals(ROWS, sender.sent().size());
+        assertEquals(6L * ROWS, sender.sent().stream().mapToLong(r -> r.value().getFieldsCount()).sum(),
+                "έξι πεδία ανά γραμμή");
 
         System.out.printf("ανάγνωση CSV   : %d γραμμές σε %d ms (%,d/s)%n",
                 ROWS, readMs, readMs > 0 ? ROWS * 1000L / readMs : 0);

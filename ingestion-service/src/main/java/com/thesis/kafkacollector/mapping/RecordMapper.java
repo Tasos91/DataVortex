@@ -46,7 +46,7 @@ public final class RecordMapper {
                     continue;
                 }
 
-                builder.putFields(name, toValue(node));
+                builder.putFields(name, Values.of(node));
             }
         }
         return builder.build();
@@ -76,7 +76,15 @@ public final class RecordMapper {
      */
     public static Long eventTimeOf(JsonNode root, String timeField) {
         if (timeField == null || timeField.isBlank()) return null;
-        JsonNode node = JsonPathResolver.resolve(root, timeField);
+        return toEpochMillis(JsonPathResolver.resolve(root, timeField));
+    }
+
+    /**
+     * Ο χρόνος ενός κόμβου σε epoch millis: αριθμός (δευτερόλεπτα ή millis) ή κείμενο ISO-8601.
+     *
+     * @return epoch millis, ή {@code null} αν ο κόμβος λείπει ή δεν διαβάζεται ως χρόνος
+     */
+    public static Long toEpochMillis(JsonNode node) {
         if (node == null || node.isNull()) return null;
         try {
             if (node.isNumber()) {
@@ -93,34 +101,13 @@ public final class RecordMapper {
             return java.time.Instant.parse(text.endsWith("Z") || text.contains("+") ? text : text + "Z")
                     .toEpochMilli();
         } catch (RuntimeException e) {
-            log.debug("Το timeField '{}' δεν διαβάστηκε ως χρόνος: {}", timeField, e.getMessage());
+            log.debug("Η τιμή '{}' δεν διαβάστηκε ως χρόνος: {}", node, e.getMessage());
             return null;
         }
     }
 
+    /** Διατηρείται για τα tests του σχήματος· η παραγωγική διαδρομή περνά από το {@link Values}. */
     static Value toValue(JsonNode node) {
-        Value.Builder v = Value.newBuilder();
-        if (node.isNull() || node.isMissingNode()) {
-            return v.setNullValue(NullValue.NULL_VALUE).build();
-        } else if (node.isBoolean()) {
-            return v.setBoolValue(node.asBoolean()).build();
-        } else if (node.isNumber()) {
-            return v.setNumberValue(node.asDouble()).build();
-        } else if (node.isTextual()) {
-            return v.setStringValue(node.asText()).build();
-        } else if (node.isArray()) {
-            ListValue.Builder list = ListValue.newBuilder();
-            for (JsonNode child : node) list.addValues(toValue(child));
-            return v.setListValue(list).build();
-        } else if (node.isObject()) {
-            Struct.Builder struct = Struct.newBuilder();
-            Iterator<Map.Entry<String, JsonNode>> it = node.fields();
-            while (it.hasNext()) {
-                Map.Entry<String, JsonNode> e = it.next();
-                struct.putFields(e.getKey(), toValue(e.getValue()));
-            }
-            return v.setStructValue(struct).build();
-        }
-        return v.setStringValue(node.asText()).build();
+        return Values.of(node);
     }
 }

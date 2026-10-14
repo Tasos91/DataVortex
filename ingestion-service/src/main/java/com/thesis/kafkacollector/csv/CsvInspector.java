@@ -333,7 +333,7 @@ public final class CsvInspector {
     }
 
     /** Το topic ΠΡΕΠΕΙ να αρχίζει από «ingest.» για να το διαβάσει ο consumer (pattern). */
-    static String sourceIdFrom(String fileName) {
+    public static String sourceIdFrom(String fileName) {
         if (fileName == null || fileName.isBlank()) {
             return "csv";
         }

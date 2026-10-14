@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DataVortex — εισαγωγή δεδομένων</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🌀</text></svg>">
+<style>
+  :root {
+    --bg: #080b11; --panel: #121824; --panel-2: #192132; --line: #243049; --line-2: #2f3d5c;
+    --text: #e8eef7; --dim: #8e9bb3; --faint: #5d6a82;
+    --accent: #4da3ff; --ok: #35d07f; --warn: #ffb224; --bad: #ff5c57; --violet: #b78cff;
+    --radius: 16px; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.6);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; color: var(--text);
+    background:
+      radial-gradient(1100px 500px at 12% -8%, rgba(77,163,255,.10), transparent 60%),
+      radial-gradient(900px 420px at 88% -12%, rgba(183,140,255,.09), transparent 60%),
+      var(--bg);
+    font: 14px/1.55 "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  header {
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+    padding: 14px 24px; border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: blur(14px);
+    position: sticky; top: 0; z-index: 20;
+  }
+  .brand { display: flex; align-items: center; gap: 11px; margin-right: auto; }
+  .brand .logo {
+    width: 34px; height: 34px; display: grid; place-items: center; border-radius: 11px; font-size: 18px;
+    background: linear-gradient(145deg, rgba(77,163,255,.9), rgba(183,140,255,.75));
+    box-shadow: 0 0 22px -4px rgba(77,163,255,.6);
+  }
+  .brand h1 { margin: 0; font-size: 17px; font-weight: 650; }
+  .brand .sub { margin: 0; color: var(--dim); font-size: 11.5px; }
+  main { max-width: 1280px; margin: 0 auto; padding: 22px 24px 70px; }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+          box-shadow: var(--shadow); padding: 18px 20px; margin-bottom: 18px; }
+  .card > h2 { margin: 0 0 4px; font-size: 14px; font-weight: 600;
+               display: flex; align-items: center; gap: 9px; }
+  .card > h2 .n { width: 21px; height: 21px; display: grid; place-items: center; flex: none;
+                  border-radius: 7px; font-size: 11.5px; background: var(--panel-2);
+                  border: 1px solid var(--line-2); color: var(--accent); }
+  .card > h2 .right { margin-left: auto; font-weight: 500; font-size: 12px; color: var(--dim); }
+  .card > .hint { margin: 0 0 14px 30px; color: var(--faint); font-size: 12px; }
+
+  #drop {
+    border: 1.5px dashed var(--line-2); border-radius: 14px; padding: 30px 20px; text-align: center;
+    cursor: pointer; transition: border-color .18s, background .18s;
+    background: linear-gradient(180deg, rgba(77,163,255,.035), transparent);
+  }
+  #drop:hover, #drop.over { border-color: var(--accent); background: rgba(77,163,255,.08); }
+  #drop .big { font-size: 28px; }
+  #drop .t { font-size: 14.5px; font-weight: 550; margin-top: 6px; }
+  #drop .s { color: var(--faint); font-size: 12px; margin-top: 3px; }
+  #file { display: none; }
+  .samples { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 11px; }
+
+  label.f { display: flex; flex-direction: column; gap: 5px; font-size: 10.5px; color: var(--faint);
+            text-transform: uppercase; letter-spacing: .6px; }
+  input, select, button, textarea { font: inherit; color: var(--text); }
+  input[type=text], input[type=number], select, textarea {
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px;
+    padding: 7px 9px; font-size: 13px; text-transform: none; letter-spacing: 0; width: 100%;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  .btn { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+         padding: 8px 15px; font-size: 13px; cursor: pointer; transition: all .15s; white-space: nowrap; }
+  .btn:hover:not(:disabled) { border-color: var(--line-2); background: #1f283c; }
+  .btn.sm { padding: 5px 10px; font-size: 12px; border-radius: 8px; }
+  .btn.primary { background: linear-gradient(145deg, var(--accent), #2d7fd8); border-color: transparent;
+                 color: #04101f; font-weight: 600; }
+  .btn.primary:hover:not(:disabled) { filter: brightness(1.1); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; }
+
+  .tablewrap { overflow-x: auto; margin: 0 -4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 7px 8px; color: var(--faint); font-size: 10.5px; font-weight: 600;
+       text-transform: uppercase; letter-spacing: .6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { padding: 5px 8px; border-bottom: 1px solid rgba(36,48,73,.5); vertical-align: middle; }
+  tr.off td { opacity: .32; }
+  tr:hover td { background: rgba(77,163,255,.04); }
+  td.path { font-family: "SF Mono", ui-monospace, monospace; font-size: 12px; font-weight: 550;
+            max-width: 230px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  td.samples { color: var(--dim); font-size: 11.5px; font-family: ui-monospace, monospace;
+               max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  td.range { color: var(--dim); font-size: 11.5px; white-space: nowrap; }
+  select.role, select.type { padding: 4px 6px; font-size: 12px; border-radius: 7px; width: auto; }
+  input.as, input.num { padding: 4px 7px; font-size: 12px; border-radius: 7px; }
+  input.as { width: 110px; } input.num { width: 64px; }
+  .cover { display: flex; align-items: center; gap: 7px; }
+  .cover .bar { width: 42px; height: 5px; border-radius: 3px; background: var(--panel-2); overflow: hidden; flex: none; }
+  .cover .bar i { display: block; height: 100%; background: var(--ok); }
+  .cover .bar i.part { background: var(--warn); }
+  .cover .bar i.none { background: var(--bad); }
+  .cover span { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 10.5px;
+          font-weight: 600; letter-spacing: .3px; }
+  .pill.csv { background: rgba(53,208,127,.16); color: #74e2a8; }
+  .pill.json { background: rgba(77,163,255,.16); color: #8ec5ff; }
+  .pill.ndjson { background: rgba(183,140,255,.16); color: #cfb0ff; }
+  .pill.xml { background: rgba(255,178,36,.16); color: #ffd486; }
+
+  .notes { margin: 12px 0 0; padding: 0; list-style: none; }
+  .notes li { display: flex; gap: 8px; padding: 7px 10px; margin-top: 6px; font-size: 12.5px;
+              border-radius: 9px; background: rgba(255,178,36,.08); border: 1px solid rgba(255,178,36,.2);
+              color: #ffd486; }
+  .notes li::before { content: "⚠"; }
+
+  .actions { display: flex; flex-wrap: wrap; gap: 11px; align-items: center; margin-top: 16px; }
+  .counts { color: var(--dim); font-size: 12.5px; margin-right: auto; }
+  .counts b { color: var(--text); }
+
+  #progress { height: 5px; border-radius: 3px; background: var(--panel-2); overflow: hidden;
+              margin-top: 14px; display: none; }
+  #progress i { display: block; height: 100%; width: 0;
+                background: linear-gradient(90deg, var(--accent), var(--violet)); transition: width .18s; }
+
+  .result { margin-top: 14px; padding: 14px 16px; border-radius: 12px; font-size: 13.5px; display: none; }
+  .result.ok { background: rgba(53,208,127,.1); border: 1px solid rgba(53,208,127,.28); }
+  .result.err { background: rgba(255,92,87,.1); border: 1px solid rgba(255,92,87,.3); }
+  .result .big { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .result a { color: var(--accent); font-weight: 600; }
+  .result .steps { color: var(--dim); font-size: 12px; margin-top: 7px; }
+
+  details { margin-top: 14px; }
+  summary { cursor: pointer; color: var(--faint); font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; }
+  pre { background: #0a0e16; border: 1px solid var(--line); border-radius: 10px; padding: 12px;
+        overflow-x: auto; font-size: 11.5px; color: #9fd0ff; margin: 9px 0 0; max-height: 340px; }
+  .hidden { display: none !important; }
+  a.plain { color: var(--dim); font-size: 12px; text-decoration: none; }
+  a.plain:hover { color: var(--accent); }
+  .pathrow { display: flex; gap: 9px; align-items: flex-end; }
+  .pathrow label.f { flex: 1; }
+  code.k { background: var(--panel-2); padding: 1px 5px; border-radius: 5px; font-size: 11.5px; color: #9fd0ff; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <div class="logo">🌀</div>
+    <div>
+      <h1>Εισαγωγή δεδομένων</h1>
+      <p class="sub">CSV · JSON · NDJSON · XML — διάλεξε τι κρατάς από οποιαδήποτε δομή</p>
+    </div>
+  </div>
+  <a class="plain" href="/dashboard">dashboard →</a>
+  <a class="plain" href="http://localhost:8085/">αναλύσεις →</a>
+</header>
+
+<main>
+  <section class="card">
+    <h2><span class="n">1</span> Το αρχείο</h2>
+    <p class="hint">Ανεβαίνουν πρώτα μόνο τα πρώτα 512 KB, όσα χρειάζονται για να δούμε τη δομή.</p>
+    <div id="drop">
+      <div class="big">📄</div>
+      <div class="t">Σύρε εδώ ένα αρχείο ή κάνε κλικ</div>
+      <div class="s">csv · json · ndjson · xml — η μορφή αναγνωρίζεται μόνη της</div>
+    </div>
+    <input type="file" id="file">
+    <div class="samples">
+      <button class="btn sm" data-demo="csv">παράδειγμα CSV</button>
+      <button class="btn sm" data-demo="json">παράδειγμα JSON (φωλιασμένο)</button>
+      <button class="btn sm" data-demo="ndjson">παράδειγμα NDJSON</button>
+      <button class="btn sm" data-demo="xml">παράδειγμα XML</button>
+    </div>
+  </section>
+
+  <section class="card hidden" id="step2">
+    <h2><span class="n">2</span> Η δομή <span class="right" id="fmtbadge"></span></h2>
+    <p class="hint" id="step2hint"></p>
+    <div class="pathrow" id="pathrow">
+      <label class="f">πού είναι οι εγγραφές
+        <input type="text" id="recordPath" placeholder="$ (η ρίζα)"></label>
+      <button class="btn" id="reinspect">Ξανά</button>
+    </div>
+    <ul class="notes" id="notes"></ul>
+  </section>
+
+  <section class="card hidden" id="step3">
+    <h2><span class="n">3</span> Τα πεδία
+      <span class="right"><label style="display:inline-flex;gap:6px;align-items:center;cursor:pointer">
+        <input type="checkbox" id="showAdv" style="width:auto"> μετασχηματισμοί</label></span></h2>
+    <p class="hint">«Μέτρηση» σημαίνει ότι το πεδίο μπαίνει στη χρονοσειρά και στην ανάλυση·
+      «ετικέτα» ότι αποθηκεύεται ως κείμενο. Ο <b>χρόνος</b> και το <b>κλειδί</b> είναι μοναδικά.</p>
+    <div class="tablewrap"><table>
+      <thead><tr>
+        <th>Διαδρομή</th><th>Τύπος</th><th>Ρόλος</th><th>Όνομα</th>
+        <th class="adv hidden">×</th><th class="adv hidden">+</th>
+        <th>Κάλυψη</th><th>Διαφ.</th><th>Εύρος</th><th>Δείγματα</th>
+      </tr></thead>
+      <tbody id="cols"></tbody>
+    </table></div>
+  </section>
+
+  <section class="card hidden" id="step4">
+    <h2><span class="n">4</span> Πού πάνε</h2>
+    <p class="hint">Το topic πρέπει να αρχίζει από <code class="k">ingest.</code> για να το διαβάσει ο consumer.</p>
+    <div class="settings">
+      <label class="f">sourceId<input type="text" id="sourceId"></label>
+      <label class="f">topic<input type="text" id="topic"></label>
+      <label class="f">partitions<input type="number" id="partitions" min="1" max="50"></label>
+      <label class="f">ωμό έγγραφο
+        <select id="storeRaw"><option value="false">όχι (μισά bytes)</option><option value="true">ναι</option></select></label>
+      <label class="f csvonly">διαχωριστικό
+        <select id="delimiter"><option value=",">, κόμμα</option><option value=";">; ερωτηματικό</option>
+          <option value="\t">tab</option><option value="|">| κάθετη</option></select></label>
+      <label class="f csvonly">δεκαδικό
+        <select id="decimal"><option value=".">. τελεία</option><option value=",">, κόμμα</option></select></label>
+      <label class="f csvonly">επικεφαλίδες
+        <select id="hasHeader"><option value="true">ναι</option><option value="false">όχι</option></select></label>
+      <label class="f">μορφή χρόνου
+        <input type="text" id="timeFormat" placeholder="αυτόματα"></label>
+    </div>
+
+    <div class="actions">
+      <div class="counts" id="counts"></div>
+      <button class="btn" id="reset">Άλλο αρχείο</button>
+      <button class="btn primary" id="go">Εισαγωγή στο Kafka →</button>
+    </div>
+    <div id="progress"><i></i></div>
+    <div class="result" id="result"></div>
+
+    <details>
+      <summary>Το request που θα φύγει</summary>
+      <pre id="specjson"></pre>
+    </details>
+  </section>
+</main>
+
+<script>
+'use strict';
+const HEAD_BYTES = 512 * 1024;
+const $ = id => document.getElementById(id);
+
+let chosenFile = null;
+let profile = null;
+
+/* ----------------------------------------------------------- παραδείγματα */
+const DEMOS = {
+  csv: ['weather-demo.csv', 'ημερομηνία;σταθμός;θερμοκρασία;υγρασία;βροχή;σημείωση\n'
+    + ['2026-09-01 08:00:00;ΑΘΗΝΑ;21,4;58,2;0;',
+       '2026-09-01 08:00:00;ΠΑΤΡΑ;19,8;66,0;1,2;"βροχή, ασθενής"',
+       '2026-09-01 09:00:00;ΑΘΗΝΑ;23,1;55,7;0;',
+       '2026-09-01 09:00:00;ΠΑΤΡΑ;20,3;64,8;2,4;"βροχή, δυνατή"',
+       '2026-09-01 10:00:00;ΑΘΗΝΑ;25,6;51,3;0;',
+       '2026-09-01 10:00:00;ΠΑΤΡΑ;21,9;62,1;NA;'].join('\n') + '\n'],
+
+  // Φωλιασμένο: οι εγγραφές είναι θαμμένες δύο επίπεδα μέσα, και κάθε σταθμός έχει λίστα μετρήσεων
+  json: ['api-response.json', JSON.stringify({
+    status: 'ok', took_ms: 12, page: 1,
+    data: {
+      stations: [
+        { id: 'ATH', name: 'Αθήνα', readings: [
+          { ts: '2026-09-01T08:00:00Z', temp_f: 70.5, sensors: { hum: 58.2, wind: 12.5 } },
+          { ts: '2026-09-01T09:00:00Z', temp_f: 73.6, sensors: { hum: 55.7, wind: 11.0 } },
+          { ts: '2026-09-01T10:00:00Z', temp_f: 78.1, sensors: { hum: 51.3, wind: 9.8 } }]},
+        { id: 'SKG', name: 'Θεσσαλονίκη', readings: [
+          { ts: '2026-09-01T08:00:00Z', temp_f: 66.0, sensors: { hum: 66.0, wind: 18.1 } },
+          { ts: '2026-09-01T09:00:00Z', temp_f: 68.5, sensors: { hum: 64.8, wind: 17.2 } },
+          { ts: '2026-09-01T10:00:00Z', temp_f: 71.4, sensors: { hum: 62.1, wind: 19.4 } }]}]
+    }}, null, 2)],
+
+  ndjson: ['telemetry.ndjson', [
+    { ts: 1790000000000, host: 'node-01', metrics: { cpu: 87.5, latency_ms: 42.1, errors: 0 } },
+    { ts: 1790000060000, host: 'node-01', metrics: { cpu: 91.2, latency_ms: 58.3, errors: 2 } },
+    { ts: 1790000000000, host: 'node-02', metrics: { cpu: 12.1, latency_ms: 8.4, errors: 0 } },
+    { ts: 1790000060000, host: 'node-02', metrics: { cpu: 15.9, latency_ms: 9.1, errors: 0 } },
+    { ts: 1790000120000, host: 'node-01', metrics: { cpu: 94.8, latency_ms: 120.5, errors: 7 } }
+  ].map(o => JSON.stringify(o)).join('\n') + '\n'],
+
+  xml: ['stations.xml', `<?xml version="1.0" encoding="UTF-8"?>
+<stations>
+  <station id="ATH" name="Αθήνα">
+    <reading ts="2026-09-01T08:00:00Z"><temp>21.4</temp><hum>58.2</hum><rain>0</rain></reading>
+    <reading ts="2026-09-01T09:00:00Z"><temp>23.1</temp><hum>55.7</hum><rain>0</rain></reading>
+    <reading ts="2026-09-01T10:00:00Z"><temp>25.6</temp><hum>51.3</hum><rain>0</rain></reading>
+  </station>
+  <station id="PAT" name="Πάτρα">
+    <reading ts="2026-09-01T08:00:00Z"><temp>19.8</temp><hum>66.0</hum><rain>1.2</rain></reading>
+    <reading ts="2026-09-01T09:00:00Z"><temp>20.3</temp><hum>64.8</hum><rain>2.4</rain></reading>
+    <reading ts="2026-09-01T10:00:00Z"><temp>21.9</temp><hum>62.1</hum><rain>0</rain></reading>
+  </station>
+</stations>`]
+};
+
+function loadDemo(kind) {
+  const demo = DEMOS[kind];
+  if (demo) load(new File([demo[1]], demo[0], {type: 'text/plain'}));
+}
+document.querySelectorAll('[data-demo]').forEach(btn => {
+  btn.onclick = () => loadDemo(btn.dataset.demo);
+});
+// Βολικό για σύνδεσμο ή για στιγμιότυπο: /ingest#demo-json φορτώνει κατευθείαν το παράδειγμα.
+if (location.hash.startsWith('#demo-')) {
+  loadDemo(location.hash.slice('#demo-'.length));
+}
+
+/* ------------------------------------------------------------ επιλογή αρχείου */
+$('drop').onclick = () => $('file').click();
+$('file').onchange = e => e.target.files[0] && load(e.target.files[0]);
+['dragenter', 'dragover'].forEach(ev => $('drop').addEventListener(ev, e => {
+  e.preventDefault(); $('drop').classList.add('over');
+}));
+['dragleave', 'drop'].forEach(ev => $('drop').addEventListener(ev, e => {
+  e.preventDefault(); $('drop').classList.remove('over');
+}));
+$('drop').addEventListener('drop', e => e.dataTransfer.files[0] && load(e.dataTransfer.files[0]));
+
+async function load(file, recordPathOverride) {
+  chosenFile = file;
+  $('drop').querySelector('.t').textContent = file.name;
+  $('drop').querySelector('.s').textContent = (file.size / 1048576).toFixed(2) + ' MB — διαβάζω τη δομή…';
+  try {
+    const res = await fetch('/api/v1/inspect?name=' + encodeURIComponent(file.name), {
+      method: 'POST', headers: {'Content-Type': 'application/octet-stream'},
+      body: file.slice(0, HEAD_BYTES)
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.status);
+    profile = body;
+    if (recordPathOverride !== undefined) profile.recordPath = recordPathOverride;
+    render();
+  } catch (err) {
+    $('drop').querySelector('.s').textContent = 'Σφάλμα: ' + err.message;
+  }
+}
+
+/* ------------------------------------------------------------------ εμφάνιση */
+const ROLES = [['metric','μέτρηση'],['label','ετικέτα'],['time','χρόνος'],['key','κλειδί'],['skip','παράλειψη']];
+const TYPES = [['number','number'],['text','text'],['bool','bool'],['timestamp','timestamp'],['','auto']];
+
+function render() {
+  const p = profile, s = p.suggestion;
+  ['step2','step3','step4'].forEach(id => $(id).classList.remove('hidden'));
+  $('drop').querySelector('.s').textContent =
+    (chosenFile.size / 1048576).toFixed(2) + ' MB · ' + p.fields.length + ' πεδία · δείγμα '
+    + p.recordsSampled + ' εγγραφών';
+
+  $('fmtbadge').innerHTML = '<span class="pill ' + p.format + '">' + p.format.toUpperCase() + '</span>';
+  const isCsv = p.format === 'csv';
+  document.querySelectorAll('.csvonly').forEach(el => el.classList.toggle('hidden', !isCsv));
+  $('pathrow').classList.toggle('hidden', isCsv);
+  $('step2hint').textContent = isCsv
+    ? 'Κάθε γραμμή του αρχείου είναι μία εγγραφή.'
+    : 'Το σύστημα βρήκε πού είναι οι εγγραφές ψάχνοντας τη μεγαλύτερη λίστα αντικειμένων. '
+      + 'Αν δεν είναι αυτές που θες, άλλαξε τη διαδρομή και πάτα «Ξανά».';
+  $('recordPath').value = p.recordPath || '';
+
+  $('cols').innerHTML = '';
+  p.fields.forEach(f => $('cols').appendChild(row(f)));
+
+  $('sourceId').value = s.sourceId || '';
+  $('topic').value = s.topic || '';
+  $('partitions').value = s.partitions || 6;
+  $('storeRaw').value = String(!!s.storeRawPayload);
+  $('timeFormat').value = s.timeFormat || '';
+  if (isCsv && s.options) {
+    $('delimiter').value = s.options.delimiter === '\\t' ? '\t' : (s.options.delimiter || ',');
+    $('decimal').value = s.options.decimal || '.';
+    $('hasHeader').value = String(s.options.hasHeader !== false);
+  }
+
+  $('notes').innerHTML = '';
+  (p.notes || []).forEach(n => {
+    const li = document.createElement('li');
+    li.appendChild(document.createTextNode(n));
+    $('notes').appendChild(li);
+  });
+  $('result').style.display = 'none';
+  refresh();
+}
+
+function row(f) {
+  const tr = document.createElement('tr');
+  tr.dataset.path = f.path;
+
+  const path = cell(tr, 'path');
+  path.textContent = f.path;
+  path.title = f.path;
+
+  cell(tr).appendChild(select('type', TYPES, f.type));
+  cell(tr).appendChild(select('role', ROLES, f.role));
+
+  const as = document.createElement('input');
+  as.type = 'text'; as.className = 'as'; as.value = shortName(f.path); as.oninput = refresh;
+  cell(tr).appendChild(as);
+
+  for (const cls of ['scale', 'offset']) {
+    const td = cell(tr, 'adv' + (showAdv() ? '' : ' hidden'));
+    const input = document.createElement('input');
+    input.type = 'number'; input.className = 'num ' + cls; input.step = 'any';
+    input.placeholder = cls === 'scale' ? '1' : '0';
+    input.oninput = refresh;
+    td.appendChild(input);
+  }
+
+  const total = f.present + f.missing;
+  const pct = total ? Math.round(100 * f.present / total) : 0;
+  const cov = cell(tr, 'cover');
+  cov.innerHTML = '<span class="bar"><i class="' + (pct === 100 ? '' : pct > 0 ? 'part' : 'none')
+    + '" style="width:' + pct + '%"></i></span><span>' + pct + '%</span>';
+
+  cell(tr, 'range').textContent = f.distinct;
+  cell(tr, 'range').textContent = rangeText(f);
+  const samples = cell(tr, 'samples');
+  samples.textContent = (f.samples || []).join(' · ') || '—';
+  samples.title = samples.textContent;
+  return tr;
+}
+
+function cell(tr, cls) {
+  const td = document.createElement('td');
+  if (cls) td.className = cls;
+  tr.appendChild(td);
+  return td;
+}
+
+function select(cls, options, value) {
+  const el = document.createElement('select');
+  el.className = cls;
+  options.forEach(([v, label]) => {
+    const o = document.createElement('option');
+    o.value = v; o.textContent = label;
+    if (v === (value || '')) o.selected = true;
+    el.appendChild(o);
+  });
+  el.onchange = () => { exclusive(el, cls); refresh(); };
+  return el;
+}
+
+/** Χρόνος και κλειδί είναι μοναδικά: δύο στήλες «χρόνος» δεν βγάζουν νόημα. */
+function exclusive(changed, cls) {
+  if (cls !== 'role' || (changed.value !== 'time' && changed.value !== 'key')) return;
+  document.querySelectorAll('#cols select.role').forEach(el => {
+    if (el !== changed && el.value === changed.value) el.value = 'label';
+  });
+}
+
+const showAdv = () => $('showAdv').checked;
+$('showAdv').onchange = () => {
+  document.querySelectorAll('.adv').forEach(el => el.classList.toggle('hidden', !showAdv()));
+};
+$('reinspect').onclick = () => chosenFile && load(chosenFile, $('recordPath').value.trim());
+const fmt = v => v.toLocaleString('el', {maximumFractionDigits: 2});
+
+/** Το εύρος όπως το διαβάζει άνθρωπος: ένα epoch 1.790.000.000.000 δεν λέει τίποτα σε κανέναν. */
+function rangeText(f) {
+  if (f.min === null || f.min === undefined) return '—';
+  if (f.type === 'timestamp' && Math.abs(f.min) > 1e8) {
+    const d = v => new Date(v > 1e11 ? v : v * 1000)
+      .toLocaleDateString('el', {day: '2-digit', month: '2-digit', year: '2-digit'});
+    return d(f.min) + ' … ' + d(f.max);
+  }
+  return fmt(f.min) + ' … ' + fmt(f.max);
+}
+const shortName = path => {
+  const p = path.startsWith('$.') ? path.slice(2) : path;
+  const i = p.lastIndexOf('.');
+  return i >= 0 ? p.slice(i + 1) : p;
+};
+
+/* ---------------------------------------------------------------------- spec */
+function buildSpec() {
+  const fields = [];
+  let timeField = null, keyField = null;
+  document.querySelectorAll('#cols tr').forEach(tr => {
+    const role = tr.querySelector('select.role').value;
+    const type = tr.querySelector('select.type').value;
+    const name = tr.querySelector('input.as').value.trim() || shortName(tr.dataset.path);
+    const scale = parseFloat(tr.querySelector('input.scale').value);
+    const offset = parseFloat(tr.querySelector('input.offset').value);
+    tr.classList.toggle('off', role === 'skip' || role === 'time');
+    if (role === 'time') { timeField = tr.dataset.path; return; }
+    if (role === 'skip') return;
+    if (role === 'key') keyField = tr.dataset.path;
+    const field = {name: name, path: tr.dataset.path, type: role === 'metric' ? 'number' : type};
+    if (!isNaN(scale)) field.scale = scale;
+    if (!isNaN(offset)) field.offset = offset;
+    fields.push(field);
+  });
+
+  const isCsv = profile.format === 'csv';
+  const spec = {
+    sourceId: $('sourceId').value.trim(),
+    topic: $('topic').value.trim(),
+    createTopicIfMissing: true,
+    partitions: Number($('partitions').value) || 6,
+    format: profile.format,
+    recordPath: isCsv ? null : ($('recordPath').value.trim() || null),
+    fields: fields,
+    timeField: timeField,
+    timeFormat: $('timeFormat').value.trim() || null,
+    keyField: keyField,
+    storeRawPayload: $('storeRaw').value === 'true'
+  };
+  if (isCsv) {
+    spec.options = {
+      delimiter: $('delimiter').value,
+      decimal: $('decimal').value,
+      hasHeader: $('hasHeader').value === 'true'
+    };
+  }
+  return spec;
+}
+
+function refresh() {
+  const spec = buildSpec();
+  $('specjson').textContent = JSON.stringify(spec, null, 2);
+  const metrics = spec.fields.filter(f => f.type === 'number').length;
+  $('counts').innerHTML = '<b>' + spec.fields.length + '</b> πεδία, από τα οποία <b>' + metrics
+    + '</b> μετρήσεις' + (spec.timeField ? ' · χρόνος: <b>' + shortName(spec.timeField) + '</b>'
+                                         : ' · <b>χωρίς χρόνο</b>')
+    + (spec.keyField ? ' · κλειδί: <b>' + shortName(spec.keyField) + '</b>' : '');
+  $('go').disabled = spec.fields.length === 0 || !spec.topic;
+
+  // Το topic πρέπει να ταιριάζει στο pattern του consumer, αλλιώς τα δεδομένα φτάνουν στο Kafka
+  // και δεν τα διαβάζει κανείς — χωρίς κανένα σφάλμα. Καλύτερα να το δει εδώ παρά να το ψάχνει.
+  const bad = spec.topic && !spec.topic.startsWith('ingest.');
+  $('topic').style.borderColor = bad ? 'var(--warn)' : '';
+  let warn = document.getElementById('topicwarn');
+  if (bad && !warn) {
+    warn = document.createElement('div');
+    warn.id = 'topicwarn';
+    warn.style.cssText = 'color:#ffd486;font-size:12px;margin-top:9px';
+    warn.textContent = '⚠ Το topic δεν αρχίζει από «ingest.»: τα δεδομένα θα σταλούν, αλλά ο '
+      + 'consumer δεν θα τα διαβάσει και δεν θα φτάσουν ποτέ στη βάση.';
+    $('counts').parentElement.insertBefore(warn, $('counts'));
+  } else if (!bad && warn) {
+    warn.remove();
+  }
+}
+
+/* ------------------------------------------------------------------ εισαγωγή */
+$('reset').onclick = () => {
+  chosenFile = null; profile = null; $('file').value = '';
+  ['step2','step3','step4'].forEach(id => $(id).classList.add('hidden'));
+  $('drop').querySelector('.t').textContent = 'Σύρε εδώ ένα αρχείο ή κάνε κλικ';
+  $('drop').querySelector('.s').textContent = 'csv · json · ndjson · xml — η μορφή αναγνωρίζεται μόνη της';
+};
+
+$('go').onclick = () => {
+  const spec = buildSpec();
+  const form = new FormData();
+  form.append('file', chosenFile, chosenFile.name);
+  form.append('spec', new Blob([JSON.stringify(spec)], {type: 'application/json'}));
+
+  const bar = $('progress');
+  bar.style.display = 'block';
+  bar.querySelector('i').style.width = '0';
+  $('go').disabled = true;
+  $('result').style.display = 'none';
+
+  const started = performance.now();
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/v1/ingest');
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) bar.querySelector('i').style.width = (100 * e.loaded / e.total) + '%';
+  };
+  xhr.onload = () => {
+    bar.querySelector('i').style.width = '100%';
+    $('go').disabled = false;
+    let body;
+    try { body = JSON.parse(xhr.responseText); } catch (e) { body = {error: xhr.responseText}; }
+    show(xhr.status, body, (performance.now() - started) / 1000, spec);
+  };
+  xhr.onerror = () => {
+    $('go').disabled = false;
+    show(0, {error: 'Το ingestion-service δεν απάντησε.'}, 0, spec);
+  };
+  xhr.send(form);
+};
+
+function show(status, body, secs, spec) {
+  const box = $('result');
+  box.style.display = 'block';
+  if (status >= 200 && status < 300 && body.accepted !== undefined) {
+    box.className = 'result ok';
+    const rate = secs > 0 ? Math.round(body.accepted / secs).toLocaleString('el') : '—';
+    box.innerHTML = '<div class="big">' + body.accepted.toLocaleString('el') + ' εγγραφές στο Kafka</div>'
+      + '<div class="steps">' + secs.toFixed(1) + 's · ' + rate + ' εγγρ/s · μορφή ' + (body.format || '')
+      + (body.skipped ? ' · άκυρες: ' + body.skipped : '')
+      + (body.failed ? ' · απέτυχαν: ' + body.failed : '')
+      + '</div><div class="steps">Ο consumer τις γράφει στη βάση σε δευτερόλεπτα. '
+      + '<a href="http://localhost:8085/?source=' + encodeURIComponent(spec.sourceId) + '" target="_blank">'
+      + 'Δες την ανάλυση →</a></div>';
+  } else {
+    box.className = 'result err';
+    box.innerHTML = '<div><b>Δεν έγινε η εισαγωγή.</b></div><div class="steps">'
+      + (body.error || ('HTTP ' + status)) + '</div>';
+  }
+}
+</script>
+</body>
+</html>

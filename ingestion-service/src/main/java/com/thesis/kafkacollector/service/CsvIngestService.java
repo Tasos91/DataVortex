@@ -6,17 +6,14 @@ import com.thesis.kafkacollector.csv.CsvReader;
 import com.thesis.kafkacollector.csv.CsvValues;
 import com.thesis.kafkacollector.proto.IngestedRecordProto;
 import io.micrometer.core.instrument.MeterRegistry;
-import org.apache.kafka.clients.producer.ProducerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
 import java.io.Reader;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Εισαγωγή CSV με βάση το {@link CsvPlan} που έφτιαξε ο χρήστης: μόνο οι στήλες που διάλεξε,
@@ -35,13 +32,12 @@ public class CsvIngestService {
 
     private static final Logger log = LoggerFactory.getLogger(CsvIngestService.class);
 
-    private final KafkaTemplate<String, IngestedRecordProto.IngestedRecord> kafkaTemplate;
+    private final RecordSender sender;
     private final KafkaTopicService topicService;
     private final IngestMeters meters;
 
-    public CsvIngestService(KafkaTemplate<String, IngestedRecordProto.IngestedRecord> kafkaTemplate,
-                            KafkaTopicService topicService, IngestMeters meters) {
-        this.kafkaTemplate = kafkaTemplate;
+    public CsvIngestService(RecordSender sender, KafkaTopicService topicService, IngestMeters meters) {
+        this.sender = sender;
         this.topicService = topicService;
         this.meters = meters;
     }
@@ -84,7 +80,7 @@ public class CsvIngestService {
      */
     public IngestResult ingest(Reader in, CsvPlan plan) throws Exception {
         String sourceId = plan.sourceId() != null && !plan.sourceId().isBlank() ? plan.sourceId() : "csv";
-        AtomicInteger failed = new AtomicInteger();
+        RecordSender.Session session = null;
         int read = 0;
         int skipped = 0;
         int noTime = 0;
@@ -101,6 +97,7 @@ public class CsvIngestService {
 
             // Το topic ελέγχεται ΜΕΤΑ το validate: ένα λάθος όνομα στήλης δεν πρέπει να φτιάξει topic.
             topic = topicService.resolve(plan.topic(), plan.createTopicIfMissing(), plan.partitions());
+            session = sender.open(topic);
 
             String[] row = plan.header() ? nextNonBlank(csv) : first;
             boolean checkedTime = false;
@@ -111,7 +108,7 @@ public class CsvIngestService {
                         assertTimeReadable(layout, row, plan);
                         checkedTime = true;
                     }
-                    if (send(topic, sourceId, layout, row, plan.keepRaw(), failed)) {
+                    if (send(session, sourceId, layout, row, plan.keepRaw())) {
                         noTime++;
                     }
                     read++;
@@ -131,7 +128,7 @@ public class CsvIngestService {
             log.warn("{} από {} γραμμές δεν είχαν διαβάσιμο χρόνο στη στήλη '{}' και πήραν την ώρα "
                     + "της εισαγωγής.", noTime, read, plan.timeColumn());
         }
-        return meters.finish(topic, "csv", read + skipped, read, skipped, failed);
+        return meters.finish("csv", read + skipped, read, skipped, session);
     }
 
     /**
@@ -170,8 +167,8 @@ public class CsvIngestService {
      *
      * @return {@code true} αν η γραμμή δεν είχε διαβάσιμο χρόνο (για να μετρηθεί)
      */
-    private boolean send(String topic, String sourceId, Layout layout, String[] row,
-                         boolean keepRaw, AtomicInteger failed) {
+    private boolean send(RecordSender.Session session, String sourceId, Layout layout, String[] row,
+                         boolean keepRaw) {
         IngestedRecordProto.IngestedRecord.Builder b = IngestedRecordProto.IngestedRecord.newBuilder()
                 .setSourceId(sourceId);
 
@@ -196,15 +193,7 @@ public class CsvIngestService {
         String key = layout.keyIndex >= 0 && layout.keyIndex < row.length ? row[layout.keyIndex] : null;
         Long eventTime = eventTime(layout, row);
 
-        kafkaTemplate.send(new ProducerRecord<>(topic, null, eventTime, emptyToNull(key), b.build()))
-                .whenComplete((result, ex) -> {
-                    if (ex != null) {
-                        failed.incrementAndGet();
-                        if (failed.get() <= 5) {
-                            log.error("Αποτυχία αποστολής στο Kafka (topic {}): {}", topic, ex.getMessage());
-                        }
-                    }
-                });
+        session.send(eventTime, emptyToNull(key), b.build());
         return layout.timeIndex >= 0 && eventTime == null;
     }
 
