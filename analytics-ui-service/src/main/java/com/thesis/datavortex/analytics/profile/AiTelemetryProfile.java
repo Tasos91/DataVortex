@@ -9,6 +9,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Τηλεμετρία υπολογιστικών πόρων (AI/ML, υποδομή).
@@ -30,6 +31,11 @@ public class AiTelemetryProfile implements DataProfile {
     private static final double ANOMALY_THRESHOLD = 3.5;
     /** Πόσες ανθεκτικές τυπικές αποκλίσεις πάνω από τη διάμεσο θεωρείται "υψηλή" καθυστέρηση. */
     private static final double LATENCY_Z = 2.5;
+
+    /** Παράθυρο εξομάλυνσης της κατάταξης· σβήνει τα μεμονωμένα αναπηδήματα. */
+    private static final int SMOOTHING = 5;
+    /** Η κατηγορία-συναγερμός: δεν εξομαλύνεται ποτέ, όσο σύντομη κι αν είναι. */
+    private static final String DEGRADED = "υποβάθμιση";
 
     @Override
     public String id() {
@@ -79,7 +85,8 @@ public class AiTelemetryProfile implements DataProfile {
         List<String> loadOrderedLabels = labelByLoad(clustering, roles);
 
         double[] distances = Profiles.centroidDistances(clustering);
-        List<String> classes = classify(input, roles);
+        List<String> classes = Profiles.smooth(
+                classify(input, roles, clustering, loadOrderedLabels), SMOOTHING, Set.of(DEGRADED));
         double[] anomalyScores = anomalyScores(input, features, distances);
 
         // Για καθυστέρηση και σφάλματα κοιτάμε τις ΑΙΧΜΕΣ του κουβά: μια αργή μέτρηση μέσα σε
@@ -129,7 +136,22 @@ public class AiTelemetryProfile implements DataProfile {
         for (int c = 0; c < k; c++) {
             order.add(c);
         }
-        order.sort(Comparator.comparingDouble(c -> loadIndex(clustering.centroidsInRealUnits().get(c), roles)));
+        // Κανονικοποίηση ανά πεδίο πριν τη σύγκριση: αλλιώς ένα πεδίο σε χιλιάδες (throughput)
+        // καθορίζει μόνο του τη σειρά και η ομάδα με χρήση 8% μπορεί να βγει "πιο φορτωμένη"
+        // από εκείνη με 96%.
+        Map<String, double[]> spans = new java.util.HashMap<>();
+        for (String field : clustering.features()) {
+            double min = Double.MAX_VALUE;
+            double max = -Double.MAX_VALUE;
+            for (Map<String, Double> centroid : clustering.centroidsInRealUnits()) {
+                double v = centroid.getOrDefault(field, 0.0);
+                min = Math.min(min, v);
+                max = Math.max(max, v);
+            }
+            spans.put(field, new double[]{min, max});
+        }
+        order.sort(Comparator.comparingDouble(
+                c -> loadIndex(clustering.centroidsInRealUnits().get(c), roles, spans)));
 
         String[] labels = new String[k];
         for (int rank = 0; rank < k; rank++) {
@@ -138,14 +160,15 @@ public class AiTelemetryProfile implements DataProfile {
         return List.of(labels);
     }
 
-    private static double loadIndex(Map<String, Double> centroid, Map<String, FieldRoles> roles) {
+    private static double loadIndex(Map<String, Double> centroid, Map<String, FieldRoles> roles,
+                                    Map<String, double[]> spans) {
         double sum = 0;
         int count = 0;
         for (Map.Entry<String, Double> e : centroid.entrySet()) {
             FieldRoles role = roles.getOrDefault(e.getKey(), FieldRoles.OTHER);
             if (role == FieldRoles.UTILIZATION || role == FieldRoles.MEMORY
                     || role == FieldRoles.THROUGHPUT || role == FieldRoles.TEMPERATURE) {
-                sum += e.getValue();
+                sum += normalised(e.getKey(), e.getValue(), spans);
                 count++;
             }
         }
@@ -153,12 +176,20 @@ public class AiTelemetryProfile implements DataProfile {
         if (count == 0) {
             for (Map.Entry<String, Double> e : centroid.entrySet()) {
                 if (roles.getOrDefault(e.getKey(), FieldRoles.OTHER) == FieldRoles.LATENCY) {
-                    sum += e.getValue();
+                    sum += normalised(e.getKey(), e.getValue(), spans);
                     count++;
                 }
             }
         }
         return count == 0 ? 0 : sum / count;
+    }
+
+    private static double normalised(String field, double value, Map<String, double[]> spans) {
+        double[] span = spans.get(field);
+        if (span == null || span[1] - span[0] < 1e-9) {
+            return 0.5;
+        }
+        return (value - span[0]) / (span[1] - span[0]);
     }
 
     private List<String> headlines(Profiles.Clustering clustering, Map<String, FieldRoles> roles) {
@@ -183,48 +214,40 @@ public class AiTelemetryProfile implements DataProfile {
     }
 
     /**
-     * Κατάταξη με κανόνες πάνω σε ποσοστημόρια του ίδιου του διαστήματος. Σταθερά όρια
-     * (π.χ. «χρήση > 80%») δεν μεταφέρονται από μηχάνημα σε μηχάνημα· τα ποσοστημόρια, ναι.
+     * Η κατάταξη πατά στο <b>καθεστώς</b> του κουβά, και οι κανόνες μπαίνουν από πάνω.
+     * <p>
+     * Η προηγούμενη εκδοχή έβγαζε την κατηγορία αποκλειστικά από ποσοστημόρια. Το πρόβλημα:
+     * όταν μια τιμή ταλαντώνεται γύρω από το 60ό ποσοστημόριο, η κατηγορία αλλάζει σε κάθε
+     * κουβά — 114 «μεταβάσεις» σε 608 κουβάδες, που δεν αντιστοιχούν σε τίποτα πραγματικό.
+     * Η ομαδοποίηση είναι εξ ορισμού σταθερή (κοιτάζει όλα τα πεδία μαζί), οπότε δίνει τη
+     * βάση· οι κανόνες κρατιούνται για ό,τι η ομαδοποίηση δεν μπορεί να δει, δηλαδή τον
+     * <b>συνδυασμό</b> «αργό χωρίς φορτίο».
      */
-    private List<String> classify(Input input, Map<String, FieldRoles> roles) {
+    private List<String> classify(Input input, Map<String, FieldRoles> roles,
+                                  Profiles.Clustering clustering, List<String> labels) {
         Optional<String> utilisation = FieldRoles.first(roles, FieldRoles.UTILIZATION);
         Optional<String> latency = FieldRoles.first(roles, FieldRoles.LATENCY);
 
         double[] util = utilisation.map(input::column).orElse(null);
-        double[] lat = latency.map(input::column).orElse(null);
-        // Τα ποσοστημόρια είναι ΣΧΕΤΙΚΑ: σε ένα πεδίο που κινείται από 45 έως 49, το ανώτερο
-        // 10% δεν είναι "κορεσμός" — είναι θόρυβος. Χωρίς αυτόν τον έλεγχο, απόλυτα ήρεμα
-        // δεδομένα θα χαρακτηρίζονταν κορεσμός και υποβάθμιση στο 20% του χρόνου.
-        boolean utilVaries = varies(util);
-        double utilHigh = util == null ? 0 : Stats.quantile(util, 0.90);
-        double utilMid = util == null ? 0 : Stats.quantile(util, 0.60);
-        double utilLow = util == null ? 0 : Stats.quantile(util, 0.20);
+        double[] lat = latency.map(input::peakColumn).orElse(null);
         double utilMedian = util == null ? 0 : Stats.median(util);
-        // Η "υψηλή καθυστέρηση" δεν ορίζεται με ποσοστημόριο: σε μια σειρά 12-13ms με δύο
-        // αιχμές στα 900ms, το 90ό ποσοστημόριο είναι 13ms και θα χαρακτήριζε τα μισά σημεία
-        // αργά. Ανθεκτικό z ως προς τη διάμεσο: μόνο οι πραγματικές εξάρσεις μετρούν.
         double latMedian = lat == null ? 0 : Stats.median(lat);
         double latMad = lat == null ? 0 : Stats.mad(lat);
 
+        int[] assignments = clustering.result().assignments();
         List<String> classes = new ArrayList<>(input.size());
         for (int i = 0; i < input.size(); i++) {
-            double u = util == null ? Double.NaN : util[i];
-            double l = lat == null ? Double.NaN : lat[i];
-
-            double latZ = lat == null ? 0 : Math.abs(Stats.robustZ(l, latMedian, latMad));
-            if (lat != null && util != null && latZ >= LATENCY_Z && u <= utilMedian) {
-                // Το σημαντικό εύρημα: αργό χωρίς να δουλεύει. Δείχνει πρόβλημα, όχι φόρτο.
-                classes.add("υποβάθμιση");
-            } else if (util != null && utilVaries && u >= utilHigh) {
-                classes.add("κορεσμός");
-            } else if (util != null && utilVaries && u >= utilMid) {
-                classes.add("βαρύ φορτίο");
-            } else if (util != null && utilVaries && u <= utilLow) {
-                classes.add("αδράνεια");
-            } else if (util == null && lat != null && latZ >= LATENCY_Z) {
-                classes.add("αργό");
+            // ΠΡΟΣΗΜΑΣΜΕΝΟ z, όχι απόλυτη τιμή: υποβάθμιση είναι μόνο η ΥΨΗΛΗ καθυστέρηση.
+            // Με απόλυτη τιμή, μια ασυνήθιστα ΧΑΜΗΛΗ καθυστέρηση σε ήρεμη ώρα χαρακτηριζόταν
+            // κι αυτή "υποβάθμιση" — 14% του χρόνου σε δεδομένα με 0,4% πραγματικές ανωμαλίες.
+            double latZ = lat == null ? 0 : Stats.robustZ(lat[i], latMedian, latMad);
+            boolean quiet = util == null || !Double.isFinite(util[i]) || util[i] <= utilMedian;
+            if (lat != null && latZ >= LATENCY_Z && quiet) {
+                // Το σημαντικό εύρημα: αργό ενώ δεν δουλεύει. Δείχνει βλάβη, όχι φόρτο.
+                classes.add(DEGRADED);
             } else {
-                classes.add("κανονικό");
+                int cluster = i < assignments.length ? assignments[i] : 0;
+                classes.add(labels.get(Math.min(cluster, labels.size() - 1)));
             }
         }
         return classes;
@@ -300,7 +323,7 @@ public class AiTelemetryProfile implements DataProfile {
     private Analysis.Verdict verdict(Input input, Map<String, FieldRoles> roles,
                                      List<Analysis.ClassCount> classes, List<Analysis.Anomaly> anomalies) {
         double saturated = share(classes, "κορεσμός");
-        double degraded = share(classes, "υποβάθμιση");
+        double degraded = share(classes, DEGRADED);
         double idle = share(classes, "αδράνεια");
         double anomalyRate = 100.0 * anomalies.size() / Math.max(1, input.size());
 

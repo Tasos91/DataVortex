@@ -38,6 +38,9 @@ public class WeatherProfile implements DataProfile {
     /** Κάτω από τόσα δείγματα, μια ώρα της ημέρας δεν φτιάχνει βάση σύγκρισης. */
     private static final int MIN_SAMPLES_PER_HOUR = 3;
 
+    /** Παράθυρο εξομάλυνσης της κατάταξης· σβήνει τα μεμονωμένα αναπηδήματα. */
+    private static final int SMOOTHING = 5;
+
     @Override
     public String id() {
         return "weather";
@@ -86,7 +89,9 @@ public class WeatherProfile implements DataProfile {
         Profiles.Clustering clustering = Profiles.cluster(input, features, Scaler.Z_SCORE, 2, 5);
 
         List<String> labels = labelRegimes(clustering, roles);
-        List<String> classes = classify(input, roles);
+        // Οι ακραίες συνθήκες δεν εξομαλύνονται: μια σύντομη καταιγίδα είναι γεγονός, όχι θόρυβος.
+        List<String> classes = Profiles.smooth(classify(input, roles), SMOOTHING,
+                java.util.Set.of("βροχή", "καύσωνας", "ψύχος"));
         List<Analysis.Anomaly> anomalies = seasonalAnomalies(input, features);
         double[] scores = seasonalScores(input, features);
 

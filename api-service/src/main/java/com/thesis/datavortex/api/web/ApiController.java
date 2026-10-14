@@ -53,6 +53,7 @@ public class ApiController {
                               @RequestParam(required = false, defaultValue = "auto") String bucket) {
         Instant[] range = range(from, to);
         Buckets b = Buckets.of(bucket, range[0], range[1]);
+        range = trimPartial(range, b, to == null);
         return new Dtos.Series(source, field, b.id(), range[0], range[1],
                 repo.series(source, field, range[0], range[1], b));
     }
@@ -69,6 +70,7 @@ public class ApiController {
                               @RequestParam(required = false, defaultValue = "avg") String agg) {
         Instant[] range = range(from, to);
         Buckets b = Buckets.of(bucket, range[0], range[1]);
+        range = trimPartial(range, b, to == null);
         return repo.matrix(source, fields, range[0], range[1], b, agg);
     }
 
@@ -80,6 +82,7 @@ public class ApiController {
                             @RequestParam(required = false, defaultValue = "auto") String bucket) {
         Instant[] range = range(from, to);
         Buckets b = Buckets.of(bucket, range[0], range[1]);
+        range = trimPartial(range, b, to == null);
         return new Dtos.Rates(source, b.id(), range[0], range[1], repo.rates(source, range[0], range[1], b));
     }
 
@@ -112,6 +115,25 @@ public class ApiController {
     private static Instant snap(Instant moment) {
         long grain = 30_000L;
         return Instant.ofEpochMilli(moment.toEpochMilli() / grain * grain);
+    }
+
+    /**
+     * Κόβει τον κουβά που ακόμα γεμίζει.
+     * <p>
+     * Ο τελευταίος κουβάς ενός ζωντανού παραθύρου περιέχει μόνο όσα πρόλαβαν να φτάσουν: ο
+     * μέσος όρος του είναι μισοτελειωμένος και το πλήθος του μικρό, οπότε κάθε γράφημα
+     * «βουτάει» στο τέλος και η ανάλυση βλέπει ανωμαλία εκεί που απλώς δεν πέρασε ακόμα η ώρα.
+     * Το κριτήριο είναι ΑΝ το τέλος ακουμπά το τώρα, όχι αν το έστειλε ρητά ο client: το UI
+     * στέλνει πάντα ρητά from/to (για να πετυχαίνει το cache), οπότε ένας έλεγχος «μου το
+     * ζήτησαν;» δεν θα έπιανε ποτέ. Ιστορικά παράθυρα μένουν ανέπαφα.
+     */
+    private static Instant[] trimPartial(Instant[] range, Buckets bucket, boolean unusedEndIsNow) {
+        long width = bucket.width().toMillis();
+        if (range[1].isBefore(Instant.now().minusMillis(width))) {
+            return range; // το παράθυρο έχει ήδη κλείσει, δεν γεμίζει τίποτα
+        }
+        Instant trimmed = Instant.ofEpochMilli(range[1].toEpochMilli() / width * width);
+        return trimmed.isAfter(range[0]) ? new Instant[]{range[0], trimmed} : range;
     }
 
     private static Instant[] range(Instant from, Instant to) {

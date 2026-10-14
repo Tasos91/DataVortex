@@ -52,7 +52,10 @@ public final class Silhouette {
      * Η τελική προσαρμογή γίνεται πάντα στα <b>πλήρη</b> δεδομένα.
      */
     public static Best chooseK(double[][] data, int minK, int maxK) {
-        int upper = Math.min(maxK, Math.max(1, data.length - 1));
+        // Τουλάχιστον ~8 σημεία ανά ομάδα: αλλιώς "βρίσκουμε" ομάδες από ένα-δύο σημεία, που
+        // δεν είναι μοτίβο αλλά θόρυβος με όνομα.
+        int upper = Math.min(maxK, Math.max(2, data.length / 8));
+        upper = Math.min(upper, Math.max(1, data.length - 1));
         double[][] sample = subsample(data);
 
         int bestK = -1;

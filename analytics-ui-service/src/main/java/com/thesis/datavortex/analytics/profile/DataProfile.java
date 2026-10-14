@@ -51,7 +51,7 @@ public interface DataProfile {
             return times.size();
         }
 
-        /** Η στήλη ενός πεδίου (μέσοι όροι), με 0 όπου λείπει τιμή. */
+        /** Η στήλη ενός πεδίου (μέσοι όροι), με {@code NaN} όπου δεν υπάρχει μέτρηση. */
         public double[] column(String field) {
             return column(values, field);
         }
@@ -63,20 +63,33 @@ public interface DataProfile {
 
         private double[] column(List<Map<String, Double>> source, String field) {
             double[] out = new double[times.size()];
+            java.util.Arrays.fill(out, Double.NaN);
             for (int i = 0; i < times.size() && i < source.size(); i++) {
                 Double v = source.get(i).get(field);
-                out[i] = v == null ? 0.0 : v;
+                if (v != null) {
+                    out[i] = v;
+                }
             }
             return out;
         }
 
-        /** Πίνακας μόνο με τα επιλεγμένα πεδία, σε πραγματικές μονάδες. */
+        /**
+         * Πίνακας μόνο με τα επιλεγμένα πεδία, σε πραγματικές μονάδες.
+         * <p>
+         * Οι αλγόριθμοι ομαδοποίησης δεν δέχονται κενά, οπότε ό,τι λείπει συμπληρώνεται με τη
+         * <b>διάμεσο του πεδίου</b> — τιμή που δεν μετακινεί το κέντρο της ομάδας, σε αντίθεση
+         * με το μηδέν που θα τραβούσε τεχνητά προς τα κάτω.
+         */
         public double[][] matrix(List<String> selected) {
             double[][] out = new double[values.size()][selected.size()];
-            for (int r = 0; r < values.size(); r++) {
-                for (int c = 0; c < selected.size(); c++) {
-                    Double v = values.get(r).get(selected.get(c));
-                    out[r][c] = v == null ? 0.0 : v;
+            for (int c = 0; c < selected.size(); c++) {
+                double[] column = column(selected.get(c));
+                double fallback = com.thesis.datavortex.analytics.ml.Stats.median(column);
+                if (!Double.isFinite(fallback)) {
+                    fallback = 0;
+                }
+                for (int r = 0; r < values.size(); r++) {
+                    out[r][c] = Double.isFinite(column[r]) ? column[r] : fallback;
                 }
             }
             return out;

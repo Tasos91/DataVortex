@@ -80,17 +80,20 @@ public class AnalyticsRepository {
     public List<Dtos.Point> series(String source, String field, Instant from, Instant to, Buckets bucket) {
         // Το view μπαίνει με string concatenation επειδή ο πίνακας δεν μπορεί να είναι
         // παράμετρος· η τιμή προέρχεται ΜΟΝΟ από το enum Buckets, ποτέ από τον χρήστη.
+        // Το time_bucket επιτρέπει ενδιάμεσα επίπεδα (5m, 15m, 6h) χωρίς νέα views: όταν το
+        // πλάτος ισούται με του view είναι άκοπο no-op, αλλιώς αθροίζει τα sum/sum_sq σωστά.
         String sql = """
-                SELECT bucket AS t, sum(n) AS n, sum(sum_v) AS sum_v, sum(sum_sq) AS sum_sq,
+                SELECT time_bucket(?::interval, bucket) AS t,
+                       sum(n) AS n, sum(sum_v) AS sum_v, sum(sum_sq) AS sum_sq,
                        min(min_v) AS min_v, max(max_v) AS max_v
                 FROM %s
                 WHERE source_id = ? AND field = ? AND bucket >= ? AND bucket < ?
-                GROUP BY bucket ORDER BY bucket
+                GROUP BY t ORDER BY t
                 """.formatted(bucket.metricView());
         return jdbc.query(sql, (rs, i) -> point(instant(rs.getTimestamp("t")), rs.getLong("n"),
                         rs.getDouble("sum_v"), rs.getDouble("sum_sq"),
                         rs.getDouble("min_v"), rs.getDouble("max_v")),
-                source, field, Timestamp.from(from), Timestamp.from(to));
+                interval(bucket), source, field, Timestamp.from(from), Timestamp.from(to));
     }
 
     /**
@@ -110,11 +113,11 @@ public class AnalyticsRepository {
             default -> throw new IllegalArgumentException("Άγνωστο agg '" + agg + "'. Δεκτά: avg, max, min.");
         };
         String sql = """
-                SELECT bucket AS t, field, sum(n) AS n, %s AS v
+                SELECT time_bucket(?::interval, bucket) AS t, field, sum(n) AS n, %s AS v
                 FROM %s
                 WHERE source_id = ? AND bucket >= ? AND bucket < ?
                   AND (?::boolean OR field = ANY (?::text[]))
-                GROUP BY bucket, field ORDER BY bucket
+                GROUP BY t, field ORDER BY t
                 """.formatted(value, bucket.metricView());
 
         boolean allFields = fields == null || fields.isEmpty();
@@ -133,7 +136,7 @@ public class AnalyticsRepository {
             if (!seen.contains(field)) {
                 seen.add(field);
             }
-        }, source, Timestamp.from(from), Timestamp.from(to),
+        }, interval(bucket), source, Timestamp.from(from), Timestamp.from(to),
                 allFields, allFields ? new String[0] : fields.toArray(String[]::new));
 
         List<Dtos.Matrix.Row> rows = values.entrySet().stream()
@@ -152,7 +155,7 @@ public class AnalyticsRepository {
                 WHERE (?::text IS NULL OR source_id = ?::text) AND bucket >= ? AND bucket < ?
                 GROUP BY t ORDER BY t
                 """, (rs, i) -> new Dtos.RatePoint(instant(rs.getTimestamp("t")), rs.getLong("n")),
-                bucket.width().getSeconds() + " seconds", source, source,
+                interval(bucket), source, source,
                 Timestamp.from(from), Timestamp.from(to));
     }
 
@@ -196,6 +199,11 @@ public class AnalyticsRepository {
     }
 
     // ---------------------------------------------------------------- βοηθητικά
+
+    /** Το πλάτος του κουβά ως interval της Postgres. */
+    private static String interval(Buckets bucket) {
+        return bucket.width().getSeconds() + " seconds";
+    }
 
     static Dtos.Point point(Instant t, long n, double sumV, double sumSq, double min, double max) {
         Double avg = n > 0 ? round(sumV / n) : null;
